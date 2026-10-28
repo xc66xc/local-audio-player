@@ -33,10 +33,22 @@ bash test.sh
 
 主分支为 `main`。改动在短期功能分支开发并提交 commit，通过 PR 审查后合入。外部开发者可以 Fork 后提 PR，具体见 [贡献指南](CONTRIBUTING.md)。
 
-维护者日常提交命令、分支保护建议及发布流程见 [GitHub 协作流程](GitHub协作流程.md)。
-
-哪些文件应进入源码仓库、哪些留在本机或 Releases，见 [文件提交规范](文件提交规范.md)。
-
-版本号、Tag 与自动发布命令见 [发布规则](发布规则.md)。应用版本统一读取 `VERSION`，维护者推送正式版本 Tag 后，GitHub Actions 会测试、打包并上传 Release。
-
 本项目采用 [MIT 许可证](LICENSE)。构建产物和测试音频不提交到 Git；应用分发使用 GitHub Releases。
+
+## 发布
+
+`VERSION` 是唯一版本来源：修复增加修订号（1.0.1），兼容功能增加次版本（1.1.0），不兼容变化增加主版本（2.0.0）。只改文档或开发配置时不单独发版。
+
+更新版本号通过 PR 合入 main，等待 CI 成功后，在干净且已同步的 main 上执行：
+
+```sh
+git switch main
+git pull --ff-only
+VERSION="$(cat VERSION)"
+git tag -a "v$VERSION" -m "Release v$VERSION"
+git push origin "v$VERSION"
+```
+
+Tag 必须是递增的新版本。推送后 GitHub Actions 自动验证主分支来源、运行测试、打包并发布 ZIP 与校验文件，发布说明根据 PR 自动生成。已发布的 Tag 禁止修改或删除。
+
+本地打包和校验使用 `bash build-app.sh --package`，无需额外发布辅助脚本。
