@@ -25,7 +25,7 @@ OGG/Opus 使用内置的 FFmpeg 精简工具进行本地流式解码，其余使
 
 ## 构建与测试
 
-需要 macOS、Swift 5.9 或更新版本的编译工具，以及系统的 make、curl、tar。首次构建会下载并校验固定版本的 FFmpeg 源码，编译仅含 Ogg 解码与 PCM 输出的本地工具，后续复用 `.build/decoder`；不包含网络协议。测试另需 `ffmpeg` 命令生成合成音频样本，可通过 `brew install ffmpeg` 安装；它不是应用的运行依赖。
+需要 macOS、Swift 5.9 或更新版本的编译工具，以及系统的 make、curl、tar。首次构建会下载并校验固定版本的 FFmpeg 源码，编译仅含 Ogg 解码与 PCM 输出的本地工具，后续复用 `.build/decoder`；不包含网络协议。测试另需含 libvorbis、libopus、libmp3lame 编码器的 `ffmpeg` 来生成合成样本；它不是应用的运行依赖。新版 Homebrew 的基础 ffmpeg 不含 libvorbis，可安装 `brew install ffmpeg-full`，然后用 `PATH="$(brew --prefix ffmpeg-full)/bin:$PATH" bash test.sh` 运行测试。
 
 ```sh
 bash build-app.sh

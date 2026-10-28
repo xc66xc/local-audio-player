@@ -35,7 +35,10 @@ jobs:
           [[ "$(uname -m)" == arm64 ]]
       - name: Audio and behavior checks
         run: |
-          if ! command -v ffmpeg >/dev/null; then brew install ffmpeg; fi
+          if ! command -v ffmpeg >/dev/null || ! ffmpeg -hide_banner -encoders 2>/dev/null | grep 'libvorbis' >/dev/null; then
+            brew install ffmpeg-full
+            export PATH="$(brew --prefix ffmpeg-full)/bin:$PATH"
+          fi
           bash test.sh
       - name: Build, sign and package
         run: bash build-app.sh --package
