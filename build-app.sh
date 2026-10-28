@@ -50,6 +50,9 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 PLIST
 codesign --force --sign - "$APP_DIR"
 codesign --verify --deep --strict "$APP_DIR"
+# Updating files inside an existing bundle does not update the bundle directory's
+# timestamp. Spotlight/Launch Services otherwise may keep the old version/icon.
+touch "$APP_DIR"
 printf '已构建：%s\n' "$APP_DIR"
 
 if [[ "${1:-}" == '--package' ]]; then
