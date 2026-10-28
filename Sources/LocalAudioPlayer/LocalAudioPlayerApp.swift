@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import OSLog
 
 @main
 struct LocalAudioPlayerApp: App {
@@ -27,6 +28,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+           let icon = NSImage(contentsOf: url) {
+            NSApp.applicationIconImage = icon
+        } else {
+            Logger(subsystem: "local.miniaudio.player", category: "Appearance")
+                .error("无法加载应用图标 AppIcon.icns")
+        }
         NSApp.activate(ignoringOtherApps: true)
     }
 
