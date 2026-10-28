@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish macOS release
+    runs-on: macos-15
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout exact tagged source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate release tag and main ancestry
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          source scripts/version.sh
+          [[ "$RELEASE_TAG" == "v$APP_VERSION" ]]
+          [[ "$(git cat-file -t "refs/tags/$RELEASE_TAG")" == tag ]]
+          git merge-base --is-ancestor HEAD origin/main
+          test -s "releases/$RELEASE_TAG.md"
+          [[ "$(uname -m)" == arm64 ]]
+      - name: Audio and behavior checks
+        run: bash test.sh
+      - name: Build, sign and package
+        run: bash scripts/package-release.sh
+      - name: Verify distributable
+        run: bash Tests/check-release.sh
+      - name: Publish release with downloadable assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          source scripts/version.sh
+          ARCHIVE="dist/LocalAudioPlayer-${RELEASE_TAG}-macOS-arm64.zip"
+          gh release create "$RELEASE_TAG" "$ARCHIVE" "$ARCHIVE.sha256" \
+            --verify-tag --title "$RELEASE_TAG" --notes-file "releases/$RELEASE_TAG.md" --latest
