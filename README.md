@@ -4,6 +4,8 @@
 
 ## 使用
 
+界面采用左侧正在播放、右侧播放列表的双栏布局。点击右下角“播放设置”可调整跳转秒数和长按倍速。
+
 从 [Releases 下载最新版本](https://github.com/xc66xc/local-audio-player/releases/latest) 中的 `LocalAudioPlayer-v版本号-macOS-arm64.zip`，解压后打开“本地音频播放器.app”。当前提供 Apple Silicon 版，未接入 Developer ID 签名或 Apple 公证，其他 Mac 从网络下载后可能被 Gatekeeper 阻止打开，详见对应 Release 说明。
 
 从源码构建后，应用位于 `dist/本地音频播放器.app`。

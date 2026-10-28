@@ -9,6 +9,7 @@ final class WindowKeyboardHandler {
     private var held = false
     private weak var controller: AudioPlayerController?
     weak var window: NSWindow?
+    var shortcutsSuspended = false
 
     static func offset(for event: NSEvent) -> Double? {
         guard event.type == .keyDown, !event.isARepeat,
@@ -72,7 +73,7 @@ final class WindowKeyboardHandler {
                 self.releaseRight()
                 return nil
             }
-            guard let window = self.window, window.isKeyWindow, event.window === window,
+            guard !self.shortcutsSuspended, let window = self.window, window.isKeyWindow, event.window === window,
                   window.attachedSheet == nil, NSApp.modalWindow == nil,
                   !controller.isChoosingFiles, controller.errorMessage == nil else {
                 self.cancelPress()

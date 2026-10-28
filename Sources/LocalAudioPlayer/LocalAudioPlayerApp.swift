@@ -9,7 +9,7 @@ struct LocalAudioPlayerApp: App {
         Window("本地音频播放器", id: "player") {
             PlayerView(controller: delegate.controller, keyboard: delegate.keyboard)
         }
-        .defaultSize(width: 500, height: 450)
+        .defaultSize(width: 1040, height: 720)
         .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(replacing: .newItem) {
