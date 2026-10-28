@@ -31,4 +31,8 @@ bash test.sh
 
 主分支为 `main`。改动在短期功能分支开发并提交 commit，通过 PR 审查后合入。外部开发者可以 Fork 后提 PR，具体见 [贡献指南](CONTRIBUTING.md)。
 
+维护者日常提交命令、分支保护建议及发布流程见 [GitHub 协作流程](GitHub协作流程.md)。
+
+哪些文件应进入源码仓库、哪些留在本机或 Releases，见 [文件提交规范](文件提交规范.md)。
+
 本项目采用 [MIT 许可证](LICENSE)。构建产物和测试音频不提交到 Git；应用分发使用 GitHub Releases。
