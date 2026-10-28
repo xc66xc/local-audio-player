@@ -7,3 +7,38 @@ xcuserdata/
 .env
 .env.*
 !.env.example
+
+# Local logs and editor state
+*.log
+*.tmp
+*.swp
+*.swo
+.idea/
+.vscode/settings.local.json
+
+# Private audio: tests generate their own synthetic fixtures
+*.m4a
+*.mp3
+*.aac
+*.wav
+*.aif
+*.aiff
+*.flac
+*.ogg
+*.caf
+/recordings/
+/local/
+
+# Signing credentials and local secrets
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+*.provisionprofile
+credentials.json
+.netrc
+
+# Distribute application archives through Releases
+*.dmg
+*.zip
