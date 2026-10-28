@@ -217,4 +217,49 @@ final class PlayerTests: CheckSuite {
         expectNil(WindowKeyboardHandler.offset(for: event(124, repeatKey: true)))
         expectNil(WindowKeyboardHandler.offset(for: event(125)))
     }
+    @MainActor func testConfigurableSeekingAndHoldRate() async throws {
+        let controller = AudioPlayerController()
+        let keyboard = WindowKeyboardHandler()
+        defer { keyboard.uninstall(); controller.shutdown() }
+        controller.addFiles([try fixture(seconds: 30)])
+        controller.load(controller.items[0].id, autoplay: false)
+        controller.forwardSeconds = 13
+        controller.backwardSeconds = 7
+        keyboard.pressRight(controller: controller)
+        keyboard.releaseRight()
+        expectEqual(controller.position, 13, accuracy: 0.05)
+        controller.seek(by: -Double(controller.backwardSeconds))
+        expectEqual(controller.position, 6, accuracy: 0.05)
+        keyboard.pressRight(controller: controller)
+        keyboard.cancelPress()
+        try await Task.sleep(nanoseconds: 400_000_000)
+        expectEqual(controller.position, 6, accuracy: 0.05)
+        expectFalse(controller.isBoosting)
+        controller.holdRate = 1.5
+        controller.togglePlayback()
+        keyboard.pressRight(controller: controller)
+        try await Task.sleep(nanoseconds: 450_000_000)
+        expectTrue(controller.isBoosting)
+        expectEqual(controller.playbackRate, Float(1.5))
+        keyboard.releaseRight()
+        expectFalse(controller.isBoosting)
+        expectEqual(controller.playbackRate, Float(1))
+        expectLessThan(controller.position, 9)
+        keyboard.pressRight(controller: controller)
+        try await Task.sleep(nanoseconds: 400_000_000)
+        keyboard.cancelPress()
+        expectEqual(controller.playbackRate, Float(1))
+        expectFalse(controller.isBoosting)
+        controller.togglePlayback()
+        keyboard.pressRight(controller: controller)
+        try await Task.sleep(nanoseconds: 400_000_000)
+        keyboard.releaseRight()
+        expectFalse(controller.isPlaying)
+        expectFalse(controller.isBoosting)
+        controller.forwardSeconds = 0
+        controller.backwardSeconds = 9999
+        expectEqual(controller.forwardSeconds, 1)
+        expectEqual(controller.backwardSeconds, 600)
+    }
+
 }

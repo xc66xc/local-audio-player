@@ -4,6 +4,8 @@ import AppKit
 struct PlayerView: View {
     @ObservedObject var controller: AudioPlayerController
     let keyboard: WindowKeyboardHandler
+    private enum SettingField: Hashable { case backward, forward }
+    @FocusState private var editingSetting: SettingField?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -50,7 +52,8 @@ struct PlayerView: View {
                         .contentShape(Rectangle())
                         .help(item.url.path)
                         .tag(item.id)
-                        .onTapGesture(count: 2) { controller.playItem(item.id) }
+                        .onTapGesture(count: 2) { editingSetting = nil; controller.playItem(item.id) }
+                        .simultaneousGesture(TapGesture().onEnded { editingSetting = nil })
                     }
                 }
                 .listStyle(.inset)
@@ -81,19 +84,33 @@ struct PlayerView: View {
                 .foregroundStyle(.secondary)
                 .padding(.top, -8)
 
-                Button { controller.togglePlayback() } label: {
+                Button { editingSetting = nil; controller.togglePlayback() } label: {
                     Label(controller.isPlaying ? "暂停" : "播放", systemImage: controller.isPlaying ? "pause.fill" : "play.fill")
                         .frame(width: 84)
                 }
                 .controlSize(.large)
                 .disabled(!controller.canPlay)
 
-                Text("← 后退 5 秒     ·     → 前进 5 秒")
+                HStack {
+                    Text("后退")
+                    TextField("秒", value: $controller.backwardSeconds, format: .number).frame(width: 50).focused($editingSetting, equals: .backward)
+                    Text("秒 · 前进")
+                    TextField("秒", value: $controller.forwardSeconds, format: .number).frame(width: 50).focused($editingSetting, equals: .forward)
+                    Text("秒")
+                }
+                Picker("长按倍速", selection: $controller.holdRate) {
+                    ForEach([Float(1.25), 1.5, 1.75, 2], id: \.self) { rate in
+                        Text(String(format: "%.2g×", rate)).tag(rate)
+                    }
+                }
+                .frame(width: 200)
+                .disabled(controller.isBoosting)
+                Text(controller.isBoosting ? "倍速播放中，松开 → 恢复正常速度" : "空格 播放/暂停 · ← 后退 · → 短按前进，播放时长按倍速")
                     .font(.caption).foregroundStyle(.secondary)
             }
             .padding(16)
         }
-        .frame(minWidth: 440, minHeight: 400)
+        .frame(minWidth: 440, minHeight: 480)
         .background(WindowAttachment { window in
             keyboard.install(for: window, controller: controller)
         })
