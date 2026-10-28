@@ -28,5 +28,7 @@ jobs:
         run: swift --version
       - name: Audio and behavior checks
         run: bash test.sh
-      - name: Release build and local signing
-        run: bash build-app.sh
+      - name: Release build, local signing and packaging
+        run: bash scripts/package-release.sh
+      - name: Validate release package
+        run: bash Tests/check-release.sh

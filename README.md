@@ -4,7 +4,9 @@
 
 ## 使用
 
-双击 `dist/本地音频播放器.app`。
+从 [Releases 下载最新版本](https://github.com/xc66xc/local-audio-player/releases/latest) 中的 `LocalAudioPlayer-v版本号-macOS-arm64.zip`，解压后打开“本地音频播放器.app”。当前提供 Apple Silicon 版，未接入 Developer ID 签名或 Apple 公证，其他 Mac 从网络下载后可能被 Gatekeeper 阻止打开，详见对应 Release 说明。
+
+从源码构建后，应用位于 `dist/本地音频播放器.app`。
 
 1. 点击“添加音频”（或 Command-O），选择一个或多个本地音频文件。
 2. 点击“播放”播放第一首；双击列表中的其他文件可切换播放。
@@ -34,5 +36,7 @@ bash test.sh
 维护者日常提交命令、分支保护建议及发布流程见 [GitHub 协作流程](GitHub协作流程.md)。
 
 哪些文件应进入源码仓库、哪些留在本机或 Releases，见 [文件提交规范](文件提交规范.md)。
+
+版本号、Tag 与自动发布命令见 [发布规则](发布规则.md)。应用版本统一读取 `VERSION`，维护者推送正式版本 Tag 后，GitHub Actions 会测试、打包并上传 Release。
 
 本项目采用 [MIT 许可证](LICENSE)。构建产物和测试音频不提交到 Git；应用分发使用 GitHub Releases。
