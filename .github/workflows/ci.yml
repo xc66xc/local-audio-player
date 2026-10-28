@@ -27,6 +27,11 @@ jobs:
       - name: Swift version
         run: swift --version
       - name: Audio and behavior checks
-        run: bash test.sh
+        run: |
+          if ! command -v ffmpeg >/dev/null || ! ffmpeg -hide_banner -encoders 2>/dev/null | grep 'libvorbis' >/dev/null; then
+            brew install ffmpeg-full
+            export PATH="$(brew --prefix ffmpeg-full)/bin:$PATH"
+          fi
+          bash test.sh
       - name: Release build, local signing and packaging
         run: bash build-app.sh --package

@@ -27,6 +27,11 @@ agent.md
 *.aiff
 *.flac
 *.ogg
+*.oga
+*.opus
+*.m4b
+*.adts
+*.aifc
 *.caf
 /recordings/
 /local/

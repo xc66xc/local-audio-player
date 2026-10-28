@@ -32,7 +32,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         isBoosting = false
     }
 
-    private var player: AVAudioPlayer?
+    private var player: (any AudioPlayback)?
     private var ticker: Timer?
     private var scopedURLs: Set<URL> = []
     private let logger = Logger(subsystem: "local.miniaudio.player", category: "Playback")
@@ -47,7 +47,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         panel.prompt = "添加"
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
-        panel.allowedContentTypes = [.audio, UTType(filenameExtension: "m4a") ?? .audio]
+        panel.allowedContentTypes = AudioFileTypes.contentTypes
         isChoosingFiles = true
         panel.beginSheetModal(for: window) { [weak self] response in
             Task { @MainActor in
@@ -88,23 +88,35 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     func load(_ id: UUID, autoplay: Bool) -> Bool {
         guard let item = items.first(where: { $0.id == id }) else { return false }
         do {
-            let candidate = try AVAudioPlayer(contentsOf: item.url)
-            candidate.enableRate = true
-            guard candidate.duration.isFinite, candidate.duration > 0, candidate.prepareToPlay() else {
-                throw PlaybackError.unreadable
+            let candidate: any AudioPlayback
+            // Use the portable decoder for Ogg consistently across supported macOS versions.
+            if AudioFileTypes.isOgg(item.url) {
+                let stream = try StreamAudioPlayer(url: item.url)
+                stream.finished = { [weak self, weak stream] success in
+                    guard let stream else { return }
+                    self?.handleFinished(stream, successfully: success)
+                }
+                candidate = stream
+            } else {
+                let native = try AVAudioPlayer(contentsOf: item.url)
+                native.enableRate = true
+                guard native.duration.isFinite, native.duration > 0, native.prepareToPlay() else {
+                    throw PlaybackError.unreadable
+                }
+                native.delegate = self
+                candidate = native
             }
             endBoost()
             let previous = player
             previous?.pause()
             if autoplay && !candidate.play() {
-                if isPlaying { previous?.play() }
+                if isPlaying { _ = previous?.play() }
                 throw PlaybackError.cannotPlay
             }
-            previous?.delegate = nil
+            (previous as? AVAudioPlayer)?.delegate = nil
             previous?.stop()
             stopTicker()
             player = candidate
-            candidate.delegate = self
             currentID = id
             selectedID = id
             duration = candidate.duration
@@ -161,7 +173,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
             // Invalidate completion callbacks for the previous playback session.
             endBoost()
             player.stop()
-            player.delegate = nil
+            (player as? AVAudioPlayer)?.delegate = nil
             self.player = nil
             isPlaying = false
             position = duration
@@ -177,7 +189,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         Task { @MainActor [weak self] in self?.handleFinished(finishedPlayer, successfully: flag) }
     }
 
-    private func handleFinished(_ finishedPlayer: AVAudioPlayer, successfully flag: Bool) {
+    private func handleFinished(_ finishedPlayer: any AudioPlayback, successfully flag: Bool) {
         guard finishedPlayer === player else { return }
         endBoost()
         isPlaying = false
@@ -214,7 +226,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     private func clearPlayback() {
         endBoost()
         stopTicker()
-        player?.delegate = nil
+        (player as? AVAudioPlayer)?.delegate = nil
         player?.stop()
         player = nil
         currentID = nil

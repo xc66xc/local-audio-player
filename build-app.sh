@@ -10,10 +10,24 @@ if ! [[ "$APP_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
   printf 'VERSION 必须是无前导零的 X.Y.Z 版本号。\n' >&2
   exit 1
 fi
+bash build-decoder.sh
 swift build -c release
 APP_DIR="$PWD/dist/本地音频播放器.app"
 mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
+mkdir -p "$APP_DIR/Contents/Helpers"
+cp .build/decoder/bin/ffmpeg .build/decoder/bin/ffprobe "$APP_DIR/Contents/Helpers/"
+cp .build/decoder/FFmpeg-LICENSE.txt "$APP_DIR/Contents/Resources/"
+codesign --force --sign - "$APP_DIR/Contents/Helpers/ffmpeg"
+codesign --force --sign - "$APP_DIR/Contents/Helpers/ffprobe"
+ICONSET="$PWD/.build/AppIcon.iconset"
+mkdir -p "$ICONSET"
+for ICON_SIZE in 16 32 128 256 512; do
+  sips -z "$ICON_SIZE" "$ICON_SIZE" assets/app-icon.png --out "$ICONSET/icon_${ICON_SIZE}x${ICON_SIZE}.png" >/dev/null
+  ICON_RETINA=$((ICON_SIZE * 2))
+  sips -z "$ICON_RETINA" "$ICON_RETINA" assets/app-icon.png --out "$ICONSET/icon_${ICON_SIZE}x${ICON_SIZE}@2x.png" >/dev/null
+done
+iconutil -c icns "$ICONSET" -o "$APP_DIR/Contents/Resources/AppIcon.icns"
 cp .build/release/LocalAudioPlayer "$APP_DIR/Contents/MacOS/LocalAudioPlayer"
 cp LICENSE "$APP_DIR/Contents/Resources/LICENSE"
 cp assets/player-wave.png "$APP_DIR/Contents/Resources/player-wave.png"
@@ -26,6 +40,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <key>CFBundleName</key><string>本地音频播放器</string>
 <key>CFBundleDisplayName</key><string>本地音频播放器</string>
 <key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundleShortVersionString</key><string>$APP_VERSION</string>
 <key>CFBundleVersion</key><string>$APP_VERSION</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
@@ -53,6 +68,12 @@ if [[ "${1:-}" == '--package' ]]; then
   test -x "$EXTRACTED_APP/Contents/MacOS/LocalAudioPlayer"
   test -s "$EXTRACTED_APP/Contents/Resources/LICENSE"
   test -s "$EXTRACTED_APP/Contents/Resources/player-wave.png"
+  test -s "$EXTRACTED_APP/Contents/Resources/AppIcon.icns"
+  test -s "$EXTRACTED_APP/Contents/Resources/FFmpeg-LICENSE.txt"
+  test -x "$EXTRACTED_APP/Contents/Helpers/ffmpeg"
+  test -x "$EXTRACTED_APP/Contents/Helpers/ffprobe"
+  "$EXTRACTED_APP/Contents/Helpers/ffmpeg" -version >/dev/null
+  "$EXTRACTED_APP/Contents/Helpers/ffprobe" -version >/dev/null
   [[ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$EXTRACTED_APP/Contents/Info.plist")" == "$APP_VERSION" ]]
   [[ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$EXTRACTED_APP/Contents/Info.plist")" == "$APP_VERSION" ]]
   codesign --verify --deep --strict "$EXTRACTED_APP"
