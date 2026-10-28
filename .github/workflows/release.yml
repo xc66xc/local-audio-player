@@ -34,7 +34,9 @@ jobs:
           git merge-base --is-ancestor HEAD origin/main
           [[ "$(uname -m)" == arm64 ]]
       - name: Audio and behavior checks
-        run: bash test.sh
+        run: |
+          if ! command -v ffmpeg >/dev/null; then brew install ffmpeg; fi
+          bash test.sh
       - name: Build, sign and package
         run: bash build-app.sh --package
       - name: Publish release with downloadable assets
@@ -45,5 +47,7 @@ jobs:
         run: |
           ARCHIVE="dist/LocalAudioPlayer-${RELEASE_TAG}-macOS-arm64.zip"
           NOTES='Apple Silicon 版，部署目标 macOS 13+，已通过 macOS 15 CI 验证。下载 ZIP 后解压打开应用。当前仅使用 ad hoc 临时签名，没有 Developer ID 签名或 Apple 公证，其他 Mac 下载后可能被 Gatekeeper 阻止打开。附带 SHA-256 校验文件；校验和不等于开发者签名。'
-          gh release create "$RELEASE_TAG" "$ARCHIVE" "$ARCHIVE.sha256" \
+          DECODER_SOURCE=".build/decoder/ffmpeg-8.1.2.tar.xz"
+          NOTES="$NOTES 随包包含 FFmpeg 8.1.2 的精简 Ogg 解码工具（LGPL 2.1+），对应未修改源码见本 Release 的 ffmpeg-8.1.2.tar.xz，构建选项见仓库 build-decoder.sh。"
+          gh release create "$RELEASE_TAG" "$ARCHIVE" "$ARCHIVE.sha256" "$DECODER_SOURCE" \
             --verify-tag --title "$RELEASE_TAG" --generate-notes --notes "$NOTES" --latest

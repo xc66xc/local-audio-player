@@ -27,6 +27,8 @@ jobs:
       - name: Swift version
         run: swift --version
       - name: Audio and behavior checks
-        run: bash test.sh
+        run: |
+          if ! command -v ffmpeg >/dev/null; then brew install ffmpeg; fi
+          bash test.sh
       - name: Release build, local signing and packaging
         run: bash build-app.sh --package

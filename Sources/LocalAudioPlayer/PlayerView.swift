@@ -80,7 +80,7 @@ struct PlayerView: View {
                 .lineLimit(2).multilineTextAlignment(.center)
                 .help(controller.currentItem?.name ?? "添加本地音频即可开始播放")
                 .padding(.top, 12)
-            Text(controller.currentItem.map { "本地音频 · \($0.url.pathExtension.uppercased())" } ?? "M4A、MP3、WAV 等本地音频")
+            Text(controller.currentItem.map { "本地音频 · \($0.url.pathExtension.uppercased())" } ?? "MP3、M4A、FLAC、WAV 等本地音频")
                 .font(.system(size: 14)).foregroundStyle(PlayerStyle.muted)
                 .padding(.top, 10)
             Spacer(minLength: 20)
@@ -247,7 +247,12 @@ private struct AudioRow: View {
         .help(item.url.path)
         .task(id: item.id) {
             do {
-                let value = try await AVURLAsset(url: item.url).load(.duration).seconds
+                let value: Double
+                if AudioFileTypes.isOgg(item.url) {
+                    value = try await OggMetadata.shared.duration(of: item.url)
+                } else {
+                    value = try await AVURLAsset(url: item.url).load(.duration).seconds
+                }
                 guard !Task.isCancelled else { return }
                 if value.isFinite, value > 0 { duration = value }
                 else { durationUnavailable = true }

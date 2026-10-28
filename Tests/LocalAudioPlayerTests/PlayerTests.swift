@@ -2,6 +2,154 @@ import AVFAudio
 import AppKit
 
 final class PlayerTests: CheckSuite {
+    private func encodedFixture(_ name: String, codec: String, seconds: Double = 8,
+                                options: [String] = []) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MiniAudioFormats-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent(name)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i",
+                             "sine=frequency=440:sample_rate=48000", "-t", String(seconds),
+                             "-ac", "2", "-af", "volume=0.001", "-c:a", codec] + options + [url.path]
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw NSError(domain: "FixtureEncoding", code: Int(process.terminationStatus))
+        }
+        return url
+    }
+
+    @MainActor func testMainstreamFormatsTransport() async throws {
+        let formats: [(String, String, [String])] = [
+            ("vbr.mp3", "libmp3lame", ["-q:a", "4"]),
+            ("cbr.mp3", "libmp3lame", ["-b:a", "128k"]),
+            ("audio.aac", "aac", []),
+            ("pcm24.wav", "pcm_s24le", []),
+            ("float.wav", "pcm_f32le", []),
+            ("lossless.flac", "flac", ["-sample_fmt", "s32", "-bits_per_raw_sample", "24"]),
+            ("audio.aiff", "pcm_s16be", []),
+            ("book.m4b", "aac", []),
+            ("audio.caf", "pcm_s24le", []),
+            ("vorbis.ogg", "libvorbis", []),
+            ("audio.opus", "libopus", []),
+            ("opus-in-ogg.ogg", "libopus", [])
+        ]
+        for (name, codec, options) in formats {
+            print("  FORMAT \(name)")
+            let url = try encodedFixture(name, codec: codec, options: options)
+            let controller = AudioPlayerController()
+            controller.addFiles([url])
+            expectTrue(controller.load(controller.items[0].id, autoplay: false))
+            expectEqual(controller.duration, 8, accuracy: 0.15)
+            controller.seek(to: 3)
+            expectEqual(controller.position, 3, accuracy: 0.05)
+            controller.togglePlayback()
+            expectTrue(controller.isPlaying)
+            try await Task.sleep(nanoseconds: 400_000_000)
+            controller.holdRate = 1.75
+            controller.beginBoost()
+            expectEqual(controller.playbackRate, Float(1.75))
+            controller.endBoost()
+            expectEqual(controller.playbackRate, Float(1))
+            controller.togglePlayback()
+            expectFalse(controller.isPlaying)
+            expectGreaterThan(controller.position, 3)
+            controller.seek(to: controller.duration)
+            expectFalse(controller.isPlaying)
+            controller.seek(by: -2)
+            expectEqual(controller.position, controller.duration - 2, accuracy: 0.1)
+            controller.shutdown()
+        }
+    }
+
+    @MainActor func testOggCompletionAndCancellation() async throws {
+        for codec in ["libvorbis", "libopus"] {
+            let controller = AudioPlayerController()
+            defer { controller.shutdown() }
+            controller.addFiles([try encodedFixture("01.ogg", codec: codec, seconds: 0.4),
+                                 try fixture("02.m4a")])
+            let first = controller.items[0].id
+            controller.autoAdvance = true
+            expectTrue(controller.load(first, autoplay: true))
+            try await Task.sleep(nanoseconds: 1_400_000_000)
+            expectEqual(controller.currentID, controller.items[1].id)
+            expectTrue(controller.isPlaying)
+            controller.autoAdvance = false
+            expectTrue(controller.load(first, autoplay: true))
+            try await Task.sleep(nanoseconds: 1_400_000_000)
+            expectEqual(controller.currentID, first)
+            expectFalse(controller.isPlaying)
+            controller.togglePlayback()
+            expectTrue(controller.isPlaying)
+            controller.seek(to: controller.duration)
+            try await Task.sleep(nanoseconds: 150_000_000)
+            expectFalse(controller.isPlaying)
+            expectEqual(controller.currentID, first)
+        }
+    }
+
+    @MainActor func testOggPauseSeekAndBadReplacement() async throws {
+        let good = try encodedFixture("01.ogg", codec: "libvorbis", seconds: 30)
+        let bad = good.deletingLastPathComponent().appendingPathComponent("02.ogg")
+        try Data("OggSbroken".utf8).write(to: bad)
+        let controller = AudioPlayerController()
+        defer { controller.shutdown() }
+        controller.addFiles([good, bad, try fixture("03.m4a")])
+        let first = controller.items[0].id
+        expectTrue(controller.load(first, autoplay: true))
+        try await Task.sleep(nanoseconds: 500_000_000)
+        controller.togglePlayback()
+        let paused = controller.position
+        try await Task.sleep(nanoseconds: 400_000_000)
+        expectEqual(controller.position, paused, accuracy: 0.05)
+        controller.seek(to: 10)
+        controller.togglePlayback()
+        try await Task.sleep(nanoseconds: 400_000_000)
+        expectGreaterThan(controller.position, 10)
+        expectFalse(controller.load(controller.items[1].id, autoplay: true))
+        expectTrue(controller.isPlaying)
+        expectEqual(controller.currentID, first)
+        expectNotNil(controller.errorMessage)
+        // Stop while the decoder has queued data; delayed callbacks must not advance.
+        controller.autoAdvance = true
+        controller.load(controller.items[2].id, autoplay: true)
+        try await Task.sleep(nanoseconds: 400_000_000)
+        expectEqual(controller.currentID, controller.items[2].id)
+    }
+
+    @MainActor func testLongOggSeekAndActualDecode() async throws {
+        let url = try encodedFixture("long.opus", codec: "libopus", seconds: 600)
+        let controller = AudioPlayerController()
+        defer { controller.shutdown() }
+        controller.addFiles([url])
+        expectTrue(controller.load(controller.items[0].id, autoplay: false))
+        expectEqual(controller.duration, 600, accuracy: 0.1)
+        controller.seek(to: 590)
+        controller.togglePlayback()
+        try await Task.sleep(nanoseconds: 650_000_000)
+        controller.togglePlayback()
+        expectGreaterThan(controller.position, 590)
+        expectLessThan(controller.position, 592)
+        // Check real decoded sample data, independently of the playback state flags.
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = try DecoderTools.executable("ffmpeg")
+        process.arguments = ["-v", "error", "-ss", "590", "-i", url.path, "-t", "0.05",
+                             "-ac", "2", "-ar", "48000", "-f", "f32le", "pipe:1"]
+        process.standardOutput = output
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        expectEqual(process.terminationStatus, 0)
+        expectGreaterThan(data.count, 1000)
+        let maximum = data.withUnsafeBytes { bytes in
+            bytes.bindMemory(to: Float.self).reduce(Float(0)) { max($0, abs($1)) }
+        }
+        expectGreaterThan(maximum, Float(0.00001))
+    }
+
     private func fixture(_ name: String = "01.m4a", seconds: Double = 12,
                          codec: AudioFormatID = kAudioFormatMPEG4AAC) throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MiniAudioTests-\(UUID())")

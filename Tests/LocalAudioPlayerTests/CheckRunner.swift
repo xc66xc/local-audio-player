@@ -46,6 +46,10 @@ struct CheckRunner {
     @MainActor static func main() async {
         let suite = PlayerTests()
         let tests: [(String, @MainActor () async throws -> Void)] = [
+            ("主流格式、VBR、24 位与浮点音频的播放/跳转/倍速", suite.testMainstreamFormatsTransport),
+            ("Vorbis/Opus 自然结束、连播及手动结束", suite.testOggCompletionAndCancellation),
+            ("Ogg 暂停、跳转、损坏文件及切换取消", suite.testOggPauseSeekAndBadReplacement),
+            ("十分钟 Opus 末段跳转及真实 PCM 解码", suite.testLongOggSeekAndActualDecode),
             ("自定义跳转、长按倍速、释放与取消", suite.testConfigurableSeekingAndHoldRate),
             ("跳转边界与时间格式", { suite.testSeekBoundsAndTimeLabels() }),
             ("M4A AAC 播放、暂停与五秒跳转", suite.testM4AAACLoadsAndPausedSeekMovesFiveSeconds),
