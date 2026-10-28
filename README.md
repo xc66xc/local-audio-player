@@ -52,3 +52,11 @@ git push origin "v$VERSION"
 Tag 必须是递增的新版本。推送后 GitHub Actions 自动验证主分支来源、运行测试、打包并发布 ZIP 与校验文件，发布说明根据 PR 自动生成。已发布的 Tag 禁止修改或删除。
 
 本地打包和校验使用 `bash build-app.sh --package`，无需额外发布辅助脚本。
+
+## ☕ 赞赏支持
+
+| 支付宝 | 微信支付 |
+| :---: | :---: |
+| <img src="assets/alipay.png" alt="支付宝赞赏二维码" width="240"> | <img src="assets/wechat-pay.png" alt="微信支付赞赏二维码" width="240"> |
+
+> 本项目免费开源。如果它对你有帮助，欢迎自愿赞赏，支持后续维护。不论赞赏与否，都感谢你的支持与使用！
