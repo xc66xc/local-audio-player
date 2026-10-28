@@ -16,6 +16,7 @@ mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
 cp .build/release/LocalAudioPlayer "$APP_DIR/Contents/MacOS/LocalAudioPlayer"
 cp LICENSE "$APP_DIR/Contents/Resources/LICENSE"
+cp assets/player-wave.png "$APP_DIR/Contents/Resources/player-wave.png"
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -51,6 +52,7 @@ if [[ "${1:-}" == '--package' ]]; then
   EXTRACTED_APP="$EXTRACTED_DIR/本地音频播放器.app"
   test -x "$EXTRACTED_APP/Contents/MacOS/LocalAudioPlayer"
   test -s "$EXTRACTED_APP/Contents/Resources/LICENSE"
+  test -s "$EXTRACTED_APP/Contents/Resources/player-wave.png"
   [[ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$EXTRACTED_APP/Contents/Info.plist")" == "$APP_VERSION" ]]
   [[ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$EXTRACTED_APP/Contents/Info.plist")" == "$APP_VERSION" ]]
   codesign --verify --deep --strict "$EXTRACTED_APP"
