@@ -15,6 +15,23 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     @Published var errorMessage: String?
     @Published private(set) var isChoosingFiles = false
 
+    @Published var forwardSeconds = 5 { didSet { if !(1...600).contains(forwardSeconds) { forwardSeconds = min(max(forwardSeconds, 1), 600) } } }
+    @Published var backwardSeconds = 5 { didSet { if !(1...600).contains(backwardSeconds) { backwardSeconds = min(max(backwardSeconds, 1), 600) } } }
+    @Published var holdRate: Float = 2
+    @Published private(set) var isBoosting = false
+    var playbackRate: Float { player?.rate ?? 1 }
+
+    func beginBoost() {
+        guard isPlaying, let player else { return }
+        player.rate = min(max(holdRate, 1), 2)
+        isBoosting = true
+    }
+
+    func endBoost() {
+        player?.rate = 1
+        isBoosting = false
+    }
+
     private var player: AVAudioPlayer?
     private var ticker: Timer?
     private var scopedURLs: Set<URL> = []
@@ -72,9 +89,11 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         guard let item = items.first(where: { $0.id == id }) else { return false }
         do {
             let candidate = try AVAudioPlayer(contentsOf: item.url)
+            candidate.enableRate = true
             guard candidate.duration.isFinite, candidate.duration > 0, candidate.prepareToPlay() else {
                 throw PlaybackError.unreadable
             }
+            endBoost()
             let previous = player
             previous?.pause()
             if autoplay && !candidate.play() {
@@ -105,6 +124,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
 
     func togglePlayback() {
         if isPlaying {
+            endBoost()
             player?.pause()
             position = player?.currentTime ?? position
             isPlaying = false
@@ -139,6 +159,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         guard let player else { return }
         if target >= duration {
             // Invalidate completion callbacks for the previous playback session.
+            endBoost()
             player.stop()
             player.delegate = nil
             self.player = nil
@@ -158,6 +179,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
 
     private func handleFinished(_ finishedPlayer: AVAudioPlayer, successfully flag: Bool) {
         guard finishedPlayer === player else { return }
+        endBoost()
         isPlaying = false
         stopTicker()
         position = duration
@@ -176,6 +198,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
 
     private func handleDecodeError(_ failedPlayer: AVAudioPlayer, error: Error?) {
         guard failedPlayer === player else { return }
+        endBoost()
         failedPlayer.pause()
         isPlaying = false
         stopTicker()
@@ -189,6 +212,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     }
 
     private func clearPlayback() {
+        endBoost()
         stopTicker()
         player?.delegate = nil
         player?.stop()
