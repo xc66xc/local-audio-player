@@ -46,6 +46,9 @@ struct CheckRunner {
     @MainActor static func main() async {
         let suite = PlayerTests()
         let tests: [(String, @MainActor () async throws -> Void)] = [
+            ("播放中真实重命名、保留数据与跨格式后续跳转", suite.testRenameActiveFormatsAndSeek),
+            ("大小写改名、暂停断点、结尾和重启恢复", suite.testRenamePausedPersistenceAndCaseChange),
+            ("同名不覆盖、非法名称、缺失与非当前曲目", suite.testRenameCollisionInvalidMissingAndInactive),
             ("跨格式恢复断点、设置与选中项且保持暂停", suite.testSessionRoundTripPausedAndSettings),
             ("恢复结尾、删除当前项与空列表", suite.testSessionEndRemovalAndEmpty),
             ("文件丢失、重新定位与时长缩短", suite.testSessionMissingRelocationAndChangedDuration),
