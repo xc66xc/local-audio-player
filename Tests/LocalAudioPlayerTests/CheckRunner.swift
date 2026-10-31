@@ -54,6 +54,7 @@ struct CheckRunner {
             ("连续更改最终状态与磁盘写入失败提示", suite.testSessionRapidUpdatesAndWriteFailure),
             ("100/1000 条记录读写量级", suite.testSessionScale),
             ("列表写入中断、启动即退出与新版断点保护", suite.testSessionInterruptedLibraryUpdateAndEarlyExit),
+            ("库缺失及备份中的未来版本均禁止覆盖", suite.testSessionFutureFilesWithoutLibraryAndInBackup),
             ("主流格式、VBR、24 位与浮点音频的播放/跳转/倍速", suite.testMainstreamFormatsTransport),
             ("Vorbis/Opus 自然结束、连播及手动结束", suite.testOggCompletionAndCancellation),
             ("Ogg 暂停、跳转、损坏文件及切换取消", suite.testOggPauseSeekAndBadReplacement),

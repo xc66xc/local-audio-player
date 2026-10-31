@@ -672,4 +672,35 @@ final class PlayerTests: CheckSuite {
         expectEqual(try Data(contentsOf: store.fileURL), base)
     }
 
+    @MainActor func testSessionFutureFilesWithoutLibraryAndInBackup() async throws {
+        let future = Data("{\"schemaVersion\":99}".utf8)
+        let store = try sessionStore()
+        // A future transport must survive even when no library can be read.
+        try future.write(to: store.checkpointURL)
+        let orphan = AudioPlayerController(sessionStore: SessionStore(fileURL: store.fileURL))
+        await orphan.restoreSession()
+        expectNotNil(orphan.sessionNotice)
+        orphan.shutdown()
+        expectEqual(try Data(contentsOf: store.checkpointURL), future)
+        expectFalse(FileManager.default.fileExists(atPath: store.fileURL.path))
+        try FileManager.default.removeItem(at: store.checkpointURL)
+        let original = AudioPlayerController(sessionStore: SessionStore(fileURL: store.fileURL))
+        await original.restoreSession()
+        original.addFiles([try fixture()])
+        original.shutdown()
+        let base = try Data(contentsOf: store.fileURL)
+        for backupURL in [store.backupURL, store.checkpointBackupURL] {
+            let previous = try Data(contentsOf: backupURL)
+            try future.write(to: backupURL)
+            let protected = AudioPlayerController(sessionStore: SessionStore(fileURL: store.fileURL))
+            await protected.restoreSession()
+            expectNotNil(protected.sessionNotice)
+            protected.forwardSeconds = 42
+            protected.shutdown()
+            expectEqual(try Data(contentsOf: backupURL), future)
+            expectEqual(try Data(contentsOf: store.fileURL), base)
+            try previous.write(to: backupURL)
+        }
+    }
+
 }

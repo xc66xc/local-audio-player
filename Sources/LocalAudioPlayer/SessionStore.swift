@@ -98,6 +98,16 @@ final class SessionStore: @unchecked Sendable {
     private func read() -> Restoration {
         var recovered = false
         do {
+            // Protect every newer file, even when its companion is missing/corrupt or
+            // a readable primary would otherwise let us return before checking a backup.
+            for url in [fileURL, backupURL, checkpointURL, checkpointBackupURL]
+                where FileManager.default.fileExists(atPath: url.path) {
+                do { try checkVersion(Data(contentsOf: url)) }
+                catch Failure.unsupportedVersion { throw Failure.unsupportedVersion }
+                catch {
+                    logger.error("[error] [session.preflight] \(String(describing: error), privacy: .private)")
+                }
+            }
             for url in [fileURL, backupURL] {
                 guard FileManager.default.fileExists(atPath: url.path) else { continue }
                 do {
