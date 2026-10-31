@@ -742,7 +742,7 @@ final class PlayerTests: CheckSuite {
             expectTrue(controller.isPlaying)
             expectEqual(controller.position, 2, accuracy: 0.3)
             controller.seek(to: 4)
-            try await Task.sleep(nanoseconds: 250_000_000)
+            expectTrue(try await waitForSession { controller.position > 4 })
             controller.togglePlayback()
             expectFalse(controller.isPlaying)
             expectGreaterThan(controller.position, 4)
