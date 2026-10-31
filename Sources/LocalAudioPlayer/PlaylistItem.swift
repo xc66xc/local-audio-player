@@ -1,13 +1,40 @@
 import Foundation
+import OSLog
 
-struct PlaylistItem: Identifiable, Equatable {
+struct PlaylistItem: Identifiable, Hashable, Codable {
     let id: UUID
     let url: URL
+    var bookmark: Data?
+    // Availability is a runtime observation, not a permanently saved error.
+    var isUnavailable = false
+    enum CodingKeys: String, CodingKey { case id, url, bookmark }
     var name: String { url.lastPathComponent }
 
-    init(url: URL) {
-        id = UUID()
+    init(url: URL, id: UUID = UUID()) {
+        self.id = id
         self.url = url.standardizedFileURL
+        do { bookmark = try url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil) }
+        catch {
+            Logger(subsystem: "local.miniaudio.player", category: "Session")
+                .error("[error] [session.bookmark] \(String(describing: error), privacy: .private)")
+        }
+    }
+
+    func resolvingReference() -> PlaylistItem {
+        var resolved = self
+        if let bookmark {
+            do {
+                var stale = false
+                let found = try URL(resolvingBookmarkData: bookmark, options: [.withoutUI, .withoutMounting],
+                                    relativeTo: nil, bookmarkDataIsStale: &stale)
+                resolved = PlaylistItem(url: found, id: id)
+            } catch {
+                Logger(subsystem: "local.miniaudio.player", category: "Session")
+                    .error("[error] [session.resolve] \(String(describing: error), privacy: .private)")
+            }
+        }
+        resolved.isUnavailable = !FileManager.default.isReadableFile(atPath: resolved.url.path)
+        return resolved
     }
 }
 

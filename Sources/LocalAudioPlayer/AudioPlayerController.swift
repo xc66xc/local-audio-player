@@ -6,18 +6,20 @@ import UniformTypeIdentifiers
 @MainActor
 final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published private(set) var items: [PlaylistItem] = []
-    @Published var selectedID: UUID?
-    @Published var autoAdvance = false
+    @Published var selectedID: UUID? { didSet { scheduleSave() } }
+    @Published var autoAdvance = false { didSet { scheduleSave() } }
     @Published private(set) var currentID: UUID?
     @Published private(set) var isPlaying = false
     @Published private(set) var position: TimeInterval = 0
     @Published private(set) var duration: TimeInterval = 0
     @Published var errorMessage: String?
+    @Published var sessionNotice: String?
+    @Published private(set) var isRestoring = false
     @Published private(set) var isChoosingFiles = false
 
-    @Published var forwardSeconds = 5 { didSet { if !(1...600).contains(forwardSeconds) { forwardSeconds = min(max(forwardSeconds, 1), 600) } } }
-    @Published var backwardSeconds = 5 { didSet { if !(1...600).contains(backwardSeconds) { backwardSeconds = min(max(backwardSeconds, 1), 600) } } }
-    @Published var holdRate: Float = 2
+    @Published var forwardSeconds = 5 { didSet { if !(1...600).contains(forwardSeconds) { forwardSeconds = min(max(forwardSeconds, 1), 600) }; scheduleSave() } }
+    @Published var backwardSeconds = 5 { didSet { if !(1...600).contains(backwardSeconds) { backwardSeconds = min(max(backwardSeconds, 1), 600) }; scheduleSave() } }
+    @Published var holdRate: Float = 2 { didSet { scheduleSave() } }
     @Published private(set) var isBoosting = false
     var playbackRate: Float { player?.rate ?? 1 }
 
@@ -37,11 +39,129 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     private var scopedURLs: Set<URL> = []
     private let logger = Logger(subsystem: "local.miniaudio.player", category: "Playback")
 
+    private let sessionStore: SessionStore?
+    private var pendingSave: Task<Void, Never>?
+    private var lastPeriodicSave = Date()
+    private var hasRestored = false
+    private var isShuttingDown = false
+    private var saveErrorShown = false
+
+    init(sessionStore: SessionStore? = nil) {
+        self.sessionStore = sessionStore
+        isRestoring = sessionStore != nil
+        super.init()
+    }
+
+    func restoreSession() async {
+        guard !hasRestored, let sessionStore else { return }
+        hasRestored = true
+        isRestoring = true
+        let result = await sessionStore.load()
+        defer { isRestoring = false }
+        guard !isShuttingDown else { return }
+        sessionNotice = result.notice
+        guard let saved = result.session else { return }
+        items = saved.items
+        for item in items where item.url.startAccessingSecurityScopedResource() { scopedURLs.insert(item.url) }
+        autoAdvance = saved.autoAdvance
+        forwardSeconds = saved.forwardSeconds
+        backwardSeconds = saved.backwardSeconds
+        holdRate = saved.holdRate
+        currentID = saved.currentID
+        position = saved.position
+        duration = saved.duration
+        // Missing files retain their saved place. Never resume or auto-advance during restoration.
+        if let id = saved.currentID, let item = currentItem, !item.isUnavailable,
+           load(id, autoplay: false) {
+            seek(to: PlaybackRules.position(saved.position, duration: duration))
+        }
+        selectedID = saved.selectedID
+        logger.info("[session.restore] paused=true count=\(self.items.count)")
+    }
+
+    private func snapshot() -> SavedSession {
+        let time = isPlaying ? (player?.currentTime ?? position) : position
+        return SavedSession(items: items, selectedID: selectedID, currentID: currentID,
+                            position: PlaybackRules.position(time, duration: duration), duration: duration,
+                            autoAdvance: autoAdvance, forwardSeconds: forwardSeconds,
+                            backwardSeconds: backwardSeconds, holdRate: holdRate)
+    }
+
+    private func scheduleSave() {
+        guard sessionStore != nil, !isRestoring, !isShuttingDown else { return }
+        pendingSave?.cancel()
+        pendingSave = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: 300_000_000) } catch { return }
+            guard let self, !Task.isCancelled else { return }
+            self.saveSession()
+        }
+    }
+
+    private func saveSession() {
+        guard let sessionStore, !isRestoring, !isShuttingDown else { return }
+        sessionStore.save(snapshot()) { [weak self] message in
+            Task { @MainActor in self?.showSaveError(message) }
+        }
+        lastPeriodicSave = Date()
+    }
+
+    private func showSaveError(_ message: String?) {
+        if let message, !saveErrorShown {
+            sessionNotice = message
+            saveErrorShown = true
+        }
+    }
+
+    func relocate(_ id: UUID, to url: URL) {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        if items.contains(where: { $0.id != id && $0.url == url.standardizedFileURL }) {
+            errorMessage = "该文件已在播放列表中，请选择其他文件。"
+            return
+        }
+        let previousItem = items[index]
+        let previousURL = previousItem.url
+        let changedURL = previousURL != url.standardizedFileURL
+        let accessed = changedURL && url.startAccessingSecurityScopedResource()
+        if accessed { scopedURLs.insert(url) }
+        items[index] = PlaylistItem(url: url, id: id)
+        if currentID == id {
+            let savedPosition = position
+            guard load(id, autoplay: false) else {
+                items[index] = previousItem
+                if accessed { url.stopAccessingSecurityScopedResource(); scopedURLs.remove(url) }
+                return
+            }
+            seek(to: min(savedPosition, duration))
+        }
+        if changedURL, let scoped = scopedURLs.first(where: { $0.standardizedFileURL == previousURL.standardizedFileURL }) {
+            scoped.stopAccessingSecurityScopedResource()
+            scopedURLs.remove(scoped)
+        }
+        scheduleSave()
+    }
+
+    func chooseReplacement(for id: UUID, in window: NSWindow?) {
+        guard !isChoosingFiles, !isRestoring, let window else { return }
+        let panel = NSOpenPanel()
+        panel.title = "重新定位音频文件"
+        panel.prompt = "选择"
+        panel.allowedContentTypes = AudioFileTypes.contentTypes
+        panel.canChooseDirectories = false
+        isChoosingFiles = true
+        panel.beginSheetModal(for: window) { [weak self] response in
+            Task { @MainActor in
+                guard let self else { return }
+                self.isChoosingFiles = false
+                if response == .OK, let url = panel.url { self.relocate(id, to: url) }
+            }
+        }
+    }
+
     var currentItem: PlaylistItem? { items.first { $0.id == currentID } }
     var canPlay: Bool { currentID != nil || selectedID != nil }
 
     func chooseFiles(in window: NSWindow?) {
-        guard !isChoosingFiles, let window else { return }
+        guard !isChoosingFiles, !isRestoring, let window else { return }
         let panel = NSOpenPanel()
         panel.title = "添加本地音频"
         panel.prompt = "添加"
@@ -70,6 +190,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
             items.append(PlaylistItem(url: url))
         }
         if selectedID == nil { selectedID = items.first?.id }
+        scheduleSave()
     }
 
     func removeSelected() {
@@ -82,6 +203,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
             scopedURLs.remove(scoped)
         }
         selectedID = items.isEmpty ? nil : items[min(index, items.count - 1)].id
+        scheduleSave()
     }
 
     @discardableResult
@@ -123,29 +245,46 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
             position = 0
             isPlaying = autoplay
             if autoplay { startTicker() }
+            if let index = items.firstIndex(where: { $0.id == id }) { items[index].isUnavailable = false }
+            scheduleSave()
             return true
         } catch {
+            if let index = items.firstIndex(where: { $0.id == id }) {
+                items[index].isUnavailable = !FileManager.default.isReadableFile(atPath: item.url.path)
+            }
             report("无法播放“\(item.name)”。文件可能已移动、损坏，或编码不受支持。", error: error)
             return false
         }
     }
 
     func playItem(_ id: UUID) {
-        if currentID == id, player != nil { resume() } else { load(id, autoplay: true) }
+        guard !isRestoring else { return }
+        if currentID == id { resumeCurrent() } else { load(id, autoplay: true) }
     }
 
     func togglePlayback() {
+        guard !isRestoring else { return }
         if isPlaying {
             endBoost()
             player?.pause()
             position = player?.currentTime ?? position
             isPlaying = false
             stopTicker()
-        } else if player != nil {
-            resume()
-        } else if let id = currentID ?? selectedID {
+        } else if currentID != nil {
+            resumeCurrent()
+        } else if let id = selectedID {
             load(id, autoplay: true)
         }
+        scheduleSave()
+    }
+
+    private func resumeCurrent() {
+        if player == nil, let id = currentID {
+            let savedPosition = position
+            guard load(id, autoplay: false) else { return }
+            seek(to: savedPosition >= duration ? 0 : savedPosition)
+        }
+        resume()
     }
 
     private func resume() {
@@ -157,6 +296,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         }
         isPlaying = true
         startTicker()
+        scheduleSave()
     }
 
     func seek(by offset: TimeInterval) {
@@ -164,6 +304,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     }
 
     func seek(to value: TimeInterval) {
+        defer { scheduleSave() }
         let target = PlaybackRules.position(value, duration: duration)
         if player == nil, let id = currentID {
             guard load(id, autoplay: false) else { return }
@@ -195,6 +336,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         isPlaying = false
         stopTicker()
         position = duration
+        scheduleSave()
         guard flag else {
             report("音频播放中断，请重新打开文件。", error: PlaybackError.unreadable)
             return
@@ -214,10 +356,15 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         failedPlayer.pause()
         isPlaying = false
         stopTicker()
+        scheduleSave()
         report("音频解码失败，请检查文件后重新打开。", error: error ?? PlaybackError.unreadable)
     }
 
     func shutdown() {
+        guard !isShuttingDown else { return }
+        pendingSave?.cancel()
+        if !isRestoring, let sessionStore { showSaveError(sessionStore.flush(snapshot())) }
+        isShuttingDown = true
         clearPlayback()
         scopedURLs.forEach { $0.stopAccessingSecurityScopedResource() }
         scopedURLs.removeAll()
@@ -241,6 +388,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
             Task { @MainActor in
                 guard let self, self.isPlaying, let player = self.player else { return }
                 self.position = player.currentTime
+                if Date().timeIntervalSince(self.lastPeriodicSave) >= 5 { self.saveSession() }
             }
         }
         RunLoop.main.add(timer, forMode: .common)

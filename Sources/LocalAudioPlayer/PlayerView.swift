@@ -28,6 +28,17 @@ struct PlayerView: View {
         .frame(minWidth: 860, minHeight: 620)
         .background(PlayerStyle.canvas)
         .tint(PlayerStyle.accent)
+        .disabled(controller.isRestoring)
+        .overlay(alignment: .top) {
+            if let notice = controller.sessionNotice {
+                HStack {
+                    Text(notice).font(.system(size: 12))
+                    Button("关闭") { controller.sessionNotice = nil }
+                }
+                .padding(12).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                .padding(12)
+            }
+        }
         .overlay(alignment: .bottomTrailing) {
             if settingsShown {
                 ZStack(alignment: .bottomTrailing) {
@@ -183,7 +194,12 @@ struct PlayerView: View {
                     ForEach(Array(controller.items.enumerated()), id: \.element.id) { index, item in
                         AudioRow(item: item, index: index + 1,
                                  isCurrent: controller.currentID == item.id,
-                                 isPlaying: controller.isPlaying)
+                                 isPlaying: controller.isPlaying,
+                                 relocate: { controller.chooseReplacement(for: item.id, in: keyboard.window) })
+                            .contextMenu {
+                                Button("重新定位文件…") { controller.chooseReplacement(for: item.id, in: keyboard.window) }
+                                Button("从列表移除") { controller.selectedID = item.id; controller.removeSelected() }
+                            }
                             .tag(item.id)
                             .listRowSeparator(.visible)
                             .listRowBackground(RoundedRectangle(cornerRadius: 10).fill(controller.currentID == item.id ? PlayerStyle.selected : Color.clear))
@@ -218,6 +234,7 @@ private struct AudioRow: View {
     let index: Int
     let isCurrent: Bool
     let isPlaying: Bool
+    let relocate: () -> Void
     @State private var duration: Double?
     @State private var durationUnavailable = false
 
@@ -237,6 +254,12 @@ private struct AudioRow: View {
                 .lineLimit(1).truncationMode(.middle)
                 .foregroundStyle(isCurrent ? PlayerStyle.accent : Color.primary)
             Spacer(minLength: 8)
+            if item.isUnavailable {
+                VStack(alignment: .trailing, spacing: 3) {
+                    Text("文件不可用").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Button("重新定位", action: relocate).buttonStyle(.borderless).font(.system(size: 11))
+                }
+            }
             Text(duration.map { PlaybackRules.timeLabel($0.rounded()) } ?? "—")
                 .font(.system(size: 12, design: .monospaced))
                 .foregroundStyle(isCurrent ? PlayerStyle.accent : PlayerStyle.muted)
@@ -245,7 +268,10 @@ private struct AudioRow: View {
         .padding(.vertical, 4)
         .contentShape(Rectangle())
         .help(item.url.path)
-        .task(id: item.id) {
+        .task(id: item) {
+            duration = nil
+            durationUnavailable = false
+            guard !item.isUnavailable else { durationUnavailable = true; return }
             do {
                 let value: Double
                 if AudioFileTypes.isOgg(item.url) {
@@ -286,7 +312,7 @@ private struct PlaybackSettings: View {
             }
             .labelsHidden().pickerStyle(.segmented)
             .disabled(controller.isBoosting)
-            Text("播放时长按 →，松开恢复正常速度\n秒数范围 1–600，设置本次运行生效")
+            Text("播放时长按 →，松开恢复正常速度\n秒数范围 1–600，设置自动保存")
                 .font(.system(size: 11)).foregroundStyle(PlayerStyle.muted)
         }
         .tint(PlayerStyle.accent)

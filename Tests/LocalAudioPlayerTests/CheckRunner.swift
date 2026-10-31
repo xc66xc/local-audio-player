@@ -46,6 +46,14 @@ struct CheckRunner {
     @MainActor static func main() async {
         let suite = PlayerTests()
         let tests: [(String, @MainActor () async throws -> Void)] = [
+            ("跨格式恢复断点、设置与选中项且保持暂停", suite.testSessionRoundTripPausedAndSettings),
+            ("恢复结尾、删除当前项与空列表", suite.testSessionEndRemovalAndEmpty),
+            ("文件丢失、重新定位与时长缩短", suite.testSessionMissingRelocationAndChangedDuration),
+            ("记录校验、备份恢复及未来版本保护", suite.testSessionBackupValidationAndFutureProtection),
+            ("未正常退出时的周期断点保存", suite.testSessionPeriodicSaveWithoutShutdown),
+            ("连续更改最终状态与磁盘写入失败提示", suite.testSessionRapidUpdatesAndWriteFailure),
+            ("100/1000 条记录读写量级", suite.testSessionScale),
+            ("列表写入中断、启动即退出与新版断点保护", suite.testSessionInterruptedLibraryUpdateAndEarlyExit),
             ("主流格式、VBR、24 位与浮点音频的播放/跳转/倍速", suite.testMainstreamFormatsTransport),
             ("Vorbis/Opus 自然结束、连播及手动结束", suite.testOggCompletionAndCancellation),
             ("Ogg 暂停、跳转、损坏文件及切换取消", suite.testOggPauseSeekAndBadReplacement),

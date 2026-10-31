@@ -8,6 +8,7 @@ bash build-decoder.sh
 swiftc -parse-as-library -o .build/checks/PlayerChecks \
   Sources/LocalAudioPlayer/AudioPlayback.swift \
   Sources/LocalAudioPlayer/PlaylistItem.swift \
+  Sources/LocalAudioPlayer/SessionStore.swift \
   Sources/LocalAudioPlayer/AudioPlayerController.swift \
   Sources/LocalAudioPlayer/WindowKeyboardHandler.swift \
   Tests/LocalAudioPlayerTests/PlayerTests.swift \
