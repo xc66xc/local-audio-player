@@ -410,6 +410,16 @@ final class PlayerTests: CheckSuite {
         expectEqual(controller.backwardSeconds, 600)
     }
 
+    @MainActor private func waitForSession(timeout: TimeInterval = 3,
+                                           until condition: () -> Bool) async throws -> Bool {
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        while !condition() {
+            guard ProcessInfo.processInfo.systemUptime < deadline else { return false }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        return true
+    }
+
     private func sessionStore() throws -> SessionStore {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MiniAudioSession-\(UUID())")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -522,7 +532,7 @@ final class PlayerTests: CheckSuite {
         controller.addFiles([try fixture()])
         controller.load(controller.items[0].id, autoplay: false)
         controller.seek(to: 2)
-        try await Task.sleep(nanoseconds: 450_000_000)
+        expectTrue(try await waitForSession { FileManager.default.fileExists(atPath: store.checkpointURL.path) })
         controller.seek(to: 7)
         controller.shutdown()
         try Data("corrupt".utf8).write(to: store.checkpointURL)
@@ -566,12 +576,18 @@ final class PlayerTests: CheckSuite {
         defer { original.shutdown() }
         original.addFiles([try fixture()])
         original.load(original.items[0].id, autoplay: true)
-        try await Task.sleep(nanoseconds: 5_800_000_000)
+        expectTrue(try await waitForSession(timeout: 8) {
+            guard let data = try? Data(contentsOf: store.checkpointURL),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let state = json["state"] as? [String: Any], let position = state["position"] as? Double
+            else { return false }
+            return position > 4.5
+        })
         // Read before shutdown: this must come from the periodic crash-recovery checkpoint.
         let reader = AudioPlayerController(sessionStore: SessionStore(fileURL: store.fileURL))
         await reader.restoreSession()
         expectGreaterThan(reader.position, 4.5)
-        expectLessThan(reader.position, 5.8)
+        expectLessThan(reader.position, 8.5)
         expectFalse(reader.isPlaying)
         reader.shutdown()
     }
@@ -597,7 +613,7 @@ final class PlayerTests: CheckSuite {
         let blocked = AudioPlayerController(sessionStore: SessionStore(fileURL: blocker.appendingPathComponent("session.json")))
         await blocked.restoreSession()
         blocked.forwardSeconds = 12
-        try await Task.sleep(nanoseconds: 450_000_000)
+        expectTrue(try await waitForSession { blocked.sessionNotice != nil })
         expectNotNil(blocked.sessionNotice)
         expectEqual(blocked.forwardSeconds, 12)
         blocked.shutdown()
@@ -639,7 +655,7 @@ final class PlayerTests: CheckSuite {
         original.addFiles([try fixture("first.m4a")])
         original.load(original.items[0].id, autoplay: false)
         original.seek(to: 3)
-        try await Task.sleep(nanoseconds: 450_000_000)
+        expectTrue(try await waitForSession { FileManager.default.fileExists(atPath: store.checkpointURL.path) })
         let stale = try Data(contentsOf: store.checkpointURL)
         original.addFiles([try fixture("second.m4a")])
         let second = original.items[1].id
