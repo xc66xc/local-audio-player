@@ -203,7 +203,13 @@ struct PlayerView: View {
                             }
                             .tag(item.id)
                             .listRowSeparator(.visible)
-                            .listRowBackground(RoundedRectangle(cornerRadius: 10).fill(controller.currentID == item.id ? PlayerStyle.selected : Color.clear))
+                            // Inset lists draw native selection/context-menu outlines
+                            // inside the row; keep the current-track fill on that edge.
+                            .listRowBackground(
+                                RoundedRectangle(cornerRadius: 9)
+                                    .fill(controller.currentID == item.id ? PlayerStyle.selected : Color.clear)
+                                    .padding(.horizontal, 10)
+                            )
                             .onTapGesture(count: 2) { controller.playItem(item.id) }
                     }
                 }
