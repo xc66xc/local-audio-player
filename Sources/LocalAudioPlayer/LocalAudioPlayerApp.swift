@@ -23,7 +23,7 @@ struct LocalAudioPlayerApp: App {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    let controller = AudioPlayerController()
+    let controller = AudioPlayerController(sessionStore: .applicationStore())
     let keyboard = WindowKeyboardHandler()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -35,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Logger(subsystem: "local.miniaudio.player", category: "Appearance")
                 .error("无法加载应用图标 AppIcon.icns")
         }
+        Task { await controller.restoreSession() }
         NSApp.activate(ignoringOtherApps: true)
     }
 
