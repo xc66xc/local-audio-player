@@ -719,4 +719,93 @@ final class PlayerTests: CheckSuite {
         }
     }
 
+    @MainActor func testRenameActiveFormatsAndSeek() async throws {
+        for (name, codec) in [("track.m4a", "aac"), ("track.mp3", "libmp3lame"),
+                              ("track.flac", "flac"), ("track.ogg", "libvorbis"), ("track.opus", "libopus")] {
+            let source = try encodedFixture(name, codec: codec)
+            let bytes = try Data(contentsOf: source)
+            let controller = AudioPlayerController()
+            defer { controller.shutdown() }
+            controller.addFiles([source, try fixture("z.m4a")])
+            let ids = controller.items.map(\.id)
+            controller.load(ids[0], autoplay: true)
+            controller.seek(to: 2)
+            controller.selectedID = ids[1]
+            expectTrue(controller.renameFile(ids[0], to: "学习 音频"))
+            let renamed = controller.items[0].url
+            expectEqual(renamed.lastPathComponent, "学习 音频." + source.pathExtension)
+            expectFalse(FileManager.default.fileExists(atPath: source.path))
+            expectEqual(try Data(contentsOf: renamed), bytes)
+            expectEqual(controller.items.map(\.id), ids)
+            expectEqual(controller.currentID, ids[0])
+            expectEqual(controller.selectedID, ids[1])
+            expectTrue(controller.isPlaying)
+            expectEqual(controller.position, 2, accuracy: 0.3)
+            controller.seek(to: 4)
+            expectTrue(try await waitForSession { controller.position > 4 })
+            controller.togglePlayback()
+            expectFalse(controller.isPlaying)
+            expectGreaterThan(controller.position, 4)
+            expectNil(controller.errorMessage)
+        }
+    }
+
+    @MainActor func testRenamePausedPersistenceAndCaseChange() async throws {
+        let store = try sessionStore()
+        let source = try fixture("track.m4a")
+        let controller = AudioPlayerController(sessionStore: store)
+        await controller.restoreSession()
+        controller.addFiles([source])
+        let id = controller.items[0].id
+        controller.load(id, autoplay: false)
+        controller.seek(to: 5)
+        expectTrue(controller.renameFile(id, to: "TRACK"))
+        expectEqual(controller.items[0].name, "TRACK.m4a")
+        expectFalse(controller.isPlaying)
+        expectEqual(controller.position, 5, accuracy: 0.05)
+        controller.shutdown()
+        let restored = AudioPlayerController(sessionStore: SessionStore(fileURL: store.fileURL))
+        await restored.restoreSession()
+        expectEqual(restored.items[0].name, "TRACK.m4a")
+        expectEqual(restored.currentID, id)
+        expectEqual(restored.position, 5, accuracy: 0.05)
+        expectFalse(restored.isPlaying)
+        restored.seek(to: restored.duration)
+        expectTrue(restored.renameFile(id, to: "播放结束"))
+        expectEqual(restored.position, restored.duration)
+        expectFalse(restored.isPlaying)
+        restored.shutdown()
+    }
+
+    @MainActor func testRenameCollisionInvalidMissingAndInactive() async throws {
+        let source = try fixture("01.m4a")
+        let conflict = source.deletingLastPathComponent().appendingPathComponent("exists.m4a")
+        let untouched = Data("do not overwrite".utf8)
+        try untouched.write(to: conflict)
+        let controller = AudioPlayerController()
+        defer { controller.shutdown() }
+        controller.addFiles([source, try fixture("02.m4a")])
+        let id = controller.items[0].id
+        controller.load(id, autoplay: true)
+        controller.seek(to: 3)
+        expectFalse(controller.renameFile(id, to: "exists"))
+        expectEqual(try Data(contentsOf: conflict), untouched)
+        expectEqual(controller.items[0].url, source)
+        expectTrue(controller.isPlaying)
+        expectEqual(controller.position, 3, accuracy: 0.1)
+        for name in ["", "  ", ".", "..", "bad/name", "bad:name", "bad\nname"] {
+            expectFalse(controller.renameFile(id, to: name))
+            expectTrue(FileManager.default.fileExists(atPath: source.path))
+        }
+        expectTrue(controller.renameFile(id, to: "01"))
+        expectTrue(controller.renameFile(controller.items[1].id, to: "第二首"))
+        expectEqual(controller.currentID, id)
+        expectTrue(controller.isPlaying)
+        expectEqual(controller.items[1].name, "第二首.m4a")
+        try FileManager.default.removeItem(at: controller.items[1].url)
+        expectFalse(controller.renameFile(controller.items[1].id, to: "不存在"))
+        expectNotNil(controller.errorMessage)
+        expectEqual(controller.items[1].name, "第二首.m4a")
+    }
+
 }

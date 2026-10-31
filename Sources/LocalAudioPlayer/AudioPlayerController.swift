@@ -140,6 +140,88 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         scheduleSave()
     }
 
+    func chooseRename(for id: UUID, in window: NSWindow?) {
+        guard !isRestoring, !isChoosingFiles, let window, window.attachedSheet == nil,
+              let item = items.first(where: { $0.id == id }) else { return }
+        let alert = NSAlert()
+        alert.messageText = "重命名音频"
+        let suffix = item.url.pathExtension
+        alert.informativeText = "将直接修改磁盘文件名。" + (suffix.isEmpty ? "" : "扩展名 .\(suffix) 保持不变。")
+        alert.addButton(withTitle: "重命名")
+        alert.addButton(withTitle: "取消")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.stringValue = item.url.deletingPathExtension().lastPathComponent
+        field.setAccessibilityLabel("新文件名（不含扩展名）")
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: window) { [weak self] response in
+            Task { @MainActor in
+                if response == .alertFirstButtonReturn { self?.renameFile(id, to: field.stringValue) }
+            }
+        }
+    }
+
+    @discardableResult
+    func renameFile(_ id: UUID, to proposedName: String) -> Bool {
+        guard !isRestoring, !isShuttingDown,
+              let index = items.firstIndex(where: { $0.id == id }) else { return false }
+        let stem = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !stem.isEmpty, stem != ".", stem != "..",
+              !stem.contains("/"), !stem.contains(":"),
+              stem.rangeOfCharacter(from: .controlCharacters) == nil else {
+            errorMessage = "名称不能为空，也不能包含 /、: 或控制字符。"
+            return false
+        }
+        let original = items[index]
+        let suffix = original.url.pathExtension
+        let filename = stem + (suffix.isEmpty ? "" : ".\(suffix)")
+        let destination = original.url.deletingLastPathComponent().appendingPathComponent(filename)
+        guard destination != original.url else { return true }
+        let manager = FileManager.default
+        let selection = selectedID
+        let wasCurrent = currentID == id
+        let wasPlaying = wasCurrent && isPlaying
+        let savedPosition = wasCurrent ? (isPlaying ? (player?.currentTime ?? position) : position) : 0
+        if wasCurrent {
+            endBoost()
+            player?.pause()
+            position = savedPosition
+            isPlaying = false
+            stopTicker()
+        }
+        do {
+            // FileManager's move refuses to overwrite an existing destination.
+            try manager.moveItem(at: original.url, to: destination)
+        } catch {
+            if wasPlaying { resume() }
+            logger.error("[error] [file.rename] \(String(describing: error), privacy: .private)")
+            errorMessage = manager.fileExists(atPath: destination.path)
+                ? "同一文件夹中已有同名文件，未覆盖任何文件。"
+                : "重命名失败，请检查文件是否存在、名称是否有效，以及文件夹是否有写入权限。"
+            return false
+        }
+        items[index] = PlaylistItem(url: destination, id: id)
+        if destination.startAccessingSecurityScopedResource() { scopedURLs.insert(destination) }
+        if wasCurrent {
+            // Release the old path: Ogg seeks create a decoder using the player's URL.
+            (player as? AVAudioPlayer)?.delegate = nil
+            player?.stop()
+            player = nil
+            if load(id, autoplay: false) {
+                seek(to: savedPosition)
+                if wasPlaying { resume() }
+            }
+        }
+        if let scoped = scopedURLs.first(where: { $0.standardizedFileURL == original.url }) {
+            scoped.stopAccessingSecurityScopedResource()
+            scopedURLs.remove(scoped)
+        }
+        selectedID = selection
+        scheduleSave()
+        logger.info("[file.rename] updated=true current=\(wasCurrent)")
+        return true
+    }
+
     func chooseReplacement(for id: UUID, in window: NSWindow?) {
         guard !isChoosingFiles, !isRestoring, let window else { return }
         let panel = NSOpenPanel()

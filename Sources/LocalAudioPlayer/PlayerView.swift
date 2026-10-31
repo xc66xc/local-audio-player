@@ -59,7 +59,7 @@ struct PlayerView: View {
         .background(WindowAttachment { window in
             keyboard.install(for: window, controller: controller)
         })
-        .alert("无法播放音频", isPresented: Binding(
+        .alert("操作未完成", isPresented: Binding(
             get: { controller.errorMessage != nil },
             set: { if !$0 { controller.errorMessage = nil } }
         )) {
@@ -197,6 +197,7 @@ struct PlayerView: View {
                                  isPlaying: controller.isPlaying,
                                  relocate: { controller.chooseReplacement(for: item.id, in: keyboard.window) })
                             .contextMenu {
+                                Button("重命名…") { controller.chooseRename(for: item.id, in: keyboard.window) }
                                 Button("重新定位文件…") { controller.chooseReplacement(for: item.id, in: keyboard.window) }
                                 Button("从列表移除") { controller.selectedID = item.id; controller.removeSelected() }
                             }
