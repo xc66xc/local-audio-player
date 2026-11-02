@@ -1,17 +1,17 @@
-# 本地音频播放器
+# Sona
 
-用于 macOS 的极简本地音频播放器，无账号或联网播放功能。应用包含所需解码工具，使用时无需安装其他软件。
+Sona 是一款轻巧的 macOS 本地音频播放器，无账号或联网播放功能。应用包含所需解码工具，使用时无需安装其他软件。
 
 ## 项目预览
 
 实际 macOS 应用界面：左侧播放控制，右侧播放列表，支持多种本地音频格式与自动连播。
 
-![本地音频播放器主界面](assets/project-preview.png)
+![Sona 主界面](assets/project-preview.png)
 
 <details>
 <summary>查看播放设置：自定义前进、后退秒数和长按倍速</summary>
 
-![本地音频播放器播放设置](assets/playback-settings-preview.png)
+![Sona 播放设置](assets/playback-settings-preview.png)
 
 </details>
 
@@ -28,9 +28,11 @@
 
 界面采用左侧正在播放、右侧播放列表的双栏布局。点击右下角“播放设置”可调整跳转秒数和长按倍速。
 
-从 [Releases 下载最新版本](https://github.com/xc66xc/local-audio-player/releases/latest) 中的 `LocalAudioPlayer-v版本号-macOS-arm64.zip`，解压后打开“本地音频播放器.app”。当前提供 Apple Silicon 版，未接入 Developer ID 签名或 Apple 公证，其他 Mac 从网络下载后可能被 Gatekeeper 阻止打开，详见对应 Release 说明。
+从 [Releases 下载最新版本](https://github.com/xc66xc/local-audio-player/releases/latest) 中的 `Sona-v版本号-macOS-arm64.zip`，解压后打开“Sona.app”。当前提供 Apple Silicon 版，未接入 Developer ID 签名或 Apple 公证，其他 Mac 从网络下载后可能被 Gatekeeper 阻止打开，详见对应 Release 说明。
 
-从源码构建后，应用位于 `dist/本地音频播放器.app`。
+从源码构建后，应用位于 `dist/Sona.app`。
+
+Sona 原名“本地音频播放器”。更名后沿用原有应用标识和本机存储目录，播放列表、进度及设置会继续恢复；使用旧版的用户请先退出旧应用，再打开 Sona。
 
 1. 点击“添加音频”（或 Command-O），选择一个或多个本地音频文件。
 2. 点击“播放”播放第一首；双击列表中的其他文件可切换播放。

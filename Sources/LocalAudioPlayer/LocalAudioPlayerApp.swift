@@ -7,7 +7,7 @@ struct LocalAudioPlayerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {
-        Window("本地音频播放器", id: "player") {
+        Window("Sona", id: "player") {
             PlayerView(controller: delegate.controller, keyboard: delegate.keyboard)
         }
         .defaultSize(width: 1040, height: 720)
