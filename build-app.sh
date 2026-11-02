@@ -12,7 +12,7 @@ if ! [[ "$APP_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
 fi
 bash build-decoder.sh
 swift build -c release
-APP_DIR="$PWD/dist/本地音频播放器.app"
+APP_DIR="$PWD/dist/Sona.app"
 mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
 mkdir -p "$APP_DIR/Contents/Helpers"
@@ -28,17 +28,17 @@ for ICON_SIZE in 16 32 128 256 512; do
   sips -z "$ICON_RETINA" "$ICON_RETINA" assets/app-icon.png --out "$ICONSET/icon_${ICON_SIZE}x${ICON_SIZE}@2x.png" >/dev/null
 done
 iconutil -c icns "$ICONSET" -o "$APP_DIR/Contents/Resources/AppIcon.icns"
-cp .build/release/LocalAudioPlayer "$APP_DIR/Contents/MacOS/LocalAudioPlayer"
+cp .build/release/LocalAudioPlayer "$APP_DIR/Contents/MacOS/Sona"
 cp LICENSE "$APP_DIR/Contents/Resources/LICENSE"
 cp assets/player-wave.png "$APP_DIR/Contents/Resources/player-wave.png"
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleExecutable</key><string>LocalAudioPlayer</string>
+<key>CFBundleExecutable</key><string>Sona</string>
 <key>CFBundleIdentifier</key><string>local.miniaudio.player</string>
-<key>CFBundleName</key><string>本地音频播放器</string>
-<key>CFBundleDisplayName</key><string>本地音频播放器</string>
+<key>CFBundleName</key><string>Sona</string>
+<key>CFBundleDisplayName</key><string>Sona</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundleShortVersionString</key><string>$APP_VERSION</string>
@@ -56,19 +56,19 @@ touch "$APP_DIR"
 printf '已构建：%s\n' "$APP_DIR"
 
 if [[ "${1:-}" == '--package' ]]; then
-  RELEASE_ARCH="$(lipo -archs "$APP_DIR/Contents/MacOS/LocalAudioPlayer")"
+  RELEASE_ARCH="$(lipo -archs "$APP_DIR/Contents/MacOS/Sona")"
   case "$RELEASE_ARCH" in
     arm64|x86_64) ;;
     *) printf '暂不支持打包架构：%s\n' "$RELEASE_ARCH" >&2; exit 1 ;;
   esac
-  ARCHIVE_NAME="LocalAudioPlayer-v${APP_VERSION}-macOS-${RELEASE_ARCH}.zip"
+  ARCHIVE_NAME="Sona-v${APP_VERSION}-macOS-${RELEASE_ARCH}.zip"
   ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$PWD/dist/$ARCHIVE_NAME"
   (cd dist && shasum -a 256 "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256" && shasum -a 256 -c "$ARCHIVE_NAME.sha256")
   EXTRACTED_DIR="$(mktemp -d "${TMPDIR:-/tmp/}MiniAudioRelease.XXXXXX")"
   trap 'rm -rf "$EXTRACTED_DIR"' EXIT
   ditto -x -k "dist/$ARCHIVE_NAME" "$EXTRACTED_DIR"
-  EXTRACTED_APP="$EXTRACTED_DIR/本地音频播放器.app"
-  test -x "$EXTRACTED_APP/Contents/MacOS/LocalAudioPlayer"
+  EXTRACTED_APP="$EXTRACTED_DIR/Sona.app"
+  test -x "$EXTRACTED_APP/Contents/MacOS/Sona"
   test -s "$EXTRACTED_APP/Contents/Resources/LICENSE"
   test -s "$EXTRACTED_APP/Contents/Resources/player-wave.png"
   test -s "$EXTRACTED_APP/Contents/Resources/AppIcon.icns"
@@ -79,6 +79,11 @@ if [[ "${1:-}" == '--package' ]]; then
   "$EXTRACTED_APP/Contents/Helpers/ffprobe" -version >/dev/null
   [[ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$EXTRACTED_APP/Contents/Info.plist")" == "$APP_VERSION" ]]
   [[ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$EXTRACTED_APP/Contents/Info.plist")" == "$APP_VERSION" ]]
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleName' "$EXTRACTED_APP/Contents/Info.plist")" == Sona ]]
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleDisplayName' "$EXTRACTED_APP/Contents/Info.plist")" == Sona ]]
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$EXTRACTED_APP/Contents/Info.plist")" == Sona ]]
+  # Keep the existing identity so renaming the app preserves saved sessions/settings.
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$EXTRACTED_APP/Contents/Info.plist")" == local.miniaudio.player ]]
   codesign --verify --deep --strict "$EXTRACTED_APP"
   printf '已打包并验证：dist/%s\n' "$ARCHIVE_NAME"
 fi
