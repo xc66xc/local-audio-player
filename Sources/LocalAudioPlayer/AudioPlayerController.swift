@@ -34,6 +34,8 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         isBoosting = false
     }
 
+    let fileDrop = FileDropImporter()
+
     private var player: (any AudioPlayback)?
     private var ticker: Timer?
     private var scopedURLs: Set<URL> = []
@@ -112,7 +114,69 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         }
     }
 
+    var canImportDroppedFiles: Bool { !isRestoring && !isShuttingDown && !isChoosingFiles && errorMessage == nil }
+
+    func selectItem(_ id: UUID?) {
+        guard selectedID != id else { return }
+        fileDrop.cancel()
+        selectedID = id
+    }
+
+    @discardableResult
+    func receiveDroppedFiles(_ providers: [NSItemProvider],
+                             canAccept: @escaping () -> Bool = { true },
+                             beforePlayback: @escaping () -> Void = {}) -> Bool {
+        guard canImportDroppedFiles, canAccept() else { return false }
+        return fileDrop.start(providers) { [weak self] files, rejected in
+            guard let self, self.canImportDroppedFiles, canAccept() else { return }
+            _ = self.commitDroppedFiles(files, rejected: rejected, beforePlayback: beforePlayback)
+        }
+    }
+
+    @discardableResult
+    func importDroppedFiles(_ urls: [URL]) -> Bool {
+        guard canImportDroppedFiles else { return false }
+        fileDrop.cancel()
+        let files = urls.compactMap { ScopedDropFile(url: $0) }
+        return commitDroppedFiles(files, rejected: urls.count - files.count, beforePlayback: {})
+    }
+
+    private func commitDroppedFiles(_ files: [ScopedDropFile], rejected: Int,
+                                    beforePlayback: () -> Void) -> Bool {
+        var skipped = rejected
+        var known = Set<URL>()
+        let accepted = files.compactMap { file -> URL? in
+            let url = file.url.standardizedFileURL
+            guard AudioFileTypes.extensions.contains(url.pathExtension.lowercased()),
+                  let values = try? file.url.resourceValues(forKeys: [.isRegularFileKey]),
+                  values.isRegularFile == true, FileManager.default.isReadableFile(atPath: file.url.path) else {
+                skipped += 1
+                return nil
+            }
+            return known.insert(url).inserted ? file.url : nil
+        }.sorted(by: Self.fileOrder)
+        guard let first = accepted.first else {
+            fileDrop.feedback = "未找到可添加的本地音频，已跳过 \(skipped) 个项目。"
+            logger.info("[drop.reject] count=\(skipped)")
+            return false
+        }
+        beforePlayback()
+        addFiles(accepted)
+        guard let target = items.first(where: { $0.url == first.standardizedFileURL }) else { return false }
+        // Keep the existing current-item resume behavior and initial-load error protection.
+        playItem(target.id)
+        fileDrop.feedback = skipped > 0 ? "已接收 \(accepted.count) 个音频，跳过 \(skipped) 个不支持或无法读取的项目。" : nil
+        logger.info("[drop.import] accepted=\(accepted.count) rejected=\(skipped)")
+        return currentID == target.id && isPlaying
+    }
+
+    private static func fileOrder(_ left: URL, _ right: URL) -> Bool {
+        let order = left.lastPathComponent.localizedStandardCompare(right.lastPathComponent)
+        return order == .orderedSame ? left.path < right.path : order == .orderedAscending
+    }
+
     func relocate(_ id: UUID, to url: URL) {
+        fileDrop.cancel()
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         if items.contains(where: { $0.id != id && $0.url == url.standardizedFileURL }) {
             errorMessage = "该文件已在播放列表中，请选择其他文件。"
@@ -141,6 +205,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     }
 
     func chooseRename(for id: UUID, in window: NSWindow?) {
+        fileDrop.cancel()
         guard !isRestoring, !isChoosingFiles, let window, window.attachedSheet == nil,
               let item = items.first(where: { $0.id == id }) else { return }
         let alert = NSAlert()
@@ -163,6 +228,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
 
     @discardableResult
     func renameFile(_ id: UUID, to proposedName: String) -> Bool {
+        fileDrop.cancel()
         guard !isRestoring, !isShuttingDown,
               let index = items.firstIndex(where: { $0.id == id }) else { return false }
         let stem = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -223,6 +289,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     }
 
     func chooseReplacement(for id: UUID, in window: NSWindow?) {
+        fileDrop.cancel()
         guard !isChoosingFiles, !isRestoring, let window else { return }
         let panel = NSOpenPanel()
         panel.title = "重新定位音频文件"
@@ -243,6 +310,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     var canPlay: Bool { currentID != nil || selectedID != nil }
 
     func chooseFiles(in window: NSWindow?) {
+        fileDrop.cancel()
         guard !isChoosingFiles, !isRestoring, let window else { return }
         let panel = NSOpenPanel()
         panel.title = "添加本地音频"
@@ -261,14 +329,16 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     }
 
     func addFiles(_ urls: [URL]) {
+        fileDrop.cancel()
         var known = Set(items.map(\.url))
-        let sorted = urls.sorted {
-            $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
-        }
+        var accessible = Set(scopedURLs.map { $0.standardizedFileURL })
+        let sorted = urls.sorted(by: Self.fileOrder)
         for original in sorted {
             let url = original.standardizedFileURL
+            if accessible.insert(url).inserted, original.startAccessingSecurityScopedResource() {
+                scopedURLs.insert(original)
+            }
             guard known.insert(url).inserted else { continue }
-            if original.startAccessingSecurityScopedResource() { scopedURLs.insert(original) }
             items.append(PlaylistItem(url: url))
         }
         if selectedID == nil { selectedID = items.first?.id }
@@ -276,6 +346,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     }
 
     func removeSelected() {
+        fileDrop.cancel()
         guard let id = selectedID, let index = items.firstIndex(where: { $0.id == id }) else { return }
         let item = items[index]
         if currentID == id { clearPlayback() }
@@ -340,11 +411,13 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     }
 
     func playItem(_ id: UUID) {
+        fileDrop.cancel()
         guard !isRestoring else { return }
         if currentID == id { resumeCurrent() } else { load(id, autoplay: true) }
     }
 
     func togglePlayback() {
+        fileDrop.cancel()
         guard !isRestoring else { return }
         if isPlaying {
             endBoost()
@@ -386,6 +459,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     }
 
     func seek(to value: TimeInterval) {
+        fileDrop.cancel()
         defer { scheduleSave() }
         let target = PlaybackRules.position(value, duration: duration)
         if player == nil, let id = currentID {
@@ -443,6 +517,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     }
 
     func shutdown() {
+        fileDrop.cancel()
         guard !isShuttingDown else { return }
         pendingSave?.cancel()
         if !isRestoring, let sessionStore { showSaveError(sessionStore.flush(snapshot())) }

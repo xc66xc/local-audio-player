@@ -22,6 +22,7 @@ final class WindowKeyboardHandler {
     }
 
     func pressRight(controller: AudioPlayerController) {
+        controller.fileDrop.cancel()
         guard !rightDown else { return }
         self.controller = controller
         rightDown = true
