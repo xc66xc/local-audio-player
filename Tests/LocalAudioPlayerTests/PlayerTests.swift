@@ -1,5 +1,43 @@
 import AVFAudio
 import AppKit
+import UniformTypeIdentifiers
+
+// A provider that only delivers after the test has performed the competing user action.
+private final class DropProviderGate: @unchecked Sendable {
+    let provider = NSItemProvider()
+    private let lock = NSLock()
+    private var completion: ((Data?, Error?) -> Void)?
+    private var didRequest = false
+    private let data: Data?
+    private let failure: NSError?
+
+    init(url: URL? = nil, fail: Bool = false) {
+        data = url.map { Data($0.absoluteString.utf8) }
+        failure = fail ? NSError(domain: "DropFixture", code: 1) : nil
+        provider.registerDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier, visibility: .all) { [weak self] callback in
+            guard let self else { return nil }
+            self.lock.lock()
+            self.completion = callback
+            self.didRequest = true
+            self.lock.unlock()
+            return nil
+        }
+    }
+
+    var wasRequested: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return didRequest
+    }
+
+    func deliver() {
+        lock.lock()
+        let callback = completion
+        completion = nil
+        lock.unlock()
+        callback?(data, failure)
+    }
+}
 
 final class PlayerTests: CheckSuite {
     private func encodedFixture(_ name: String, codec: String, seconds: Double = 8,
@@ -806,6 +844,265 @@ final class PlayerTests: CheckSuite {
         expectFalse(controller.renameFile(controller.items[1].id, to: "不存在"))
         expectNotNil(controller.errorMessage)
         expectEqual(controller.items[1].name, "第二首.m4a")
+    }
+
+    private func dropProvider(_ url: URL) -> NSItemProvider {
+        NSItemProvider(item: url as NSURL, typeIdentifier: UTType.fileURL.identifier)
+    }
+
+    @MainActor func testDroppedFormatsResumeAndPersistence() async throws {
+        for (name, codec) in [("中文 录音.m4a", "aac"), ("song.mp3", "libmp3lame"),
+                              ("track.flac", "flac"), ("track.ogg", "libvorbis"), ("track.opus", "libopus")] {
+            let url = try encodedFixture(name, codec: codec)
+            let controller = AudioPlayerController()
+            defer { controller.shutdown() }
+            expectTrue(controller.importDroppedFiles([url]))
+            expectEqual(controller.items.count, 1)
+            expectTrue(controller.isPlaying)
+            let id = controller.currentID
+            controller.seek(to: 3)
+            controller.togglePlayback()
+            expectTrue(controller.importDroppedFiles([url, url]))
+            expectEqual(controller.items.count, 1)
+            expectEqual(controller.currentID, id)
+            expectEqual(controller.position, 3, accuracy: 0.1)
+            expectTrue(controller.isPlaying)
+            expectTrue(FileManager.default.fileExists(atPath: url.path))
+        }
+        let store = try sessionStore()
+        let original = AudioPlayerController(sessionStore: store)
+        await original.restoreSession()
+        expectTrue(original.importDroppedFiles([try fixture("saved drop.m4a")]))
+        original.seek(to: 4)
+        original.togglePlayback()
+        let id = original.currentID
+        original.shutdown()
+        let restored = AudioPlayerController(sessionStore: SessionStore(fileURL: store.fileURL))
+        await restored.restoreSession()
+        expectEqual(restored.items.count, 1)
+        expectEqual(restored.currentID, id)
+        expectEqual(restored.position, 4, accuracy: 0.1)
+        expectFalse(restored.isPlaying)
+        restored.shutdown()
+    }
+
+    @MainActor func testDroppedBatchOrderDuplicatesAndExistingQueue() async throws {
+        let old = try fixture("00-old.m4a")
+        let first = try fixture("02-new.m4a")
+        let second = try fixture("10-new.m4a")
+        let controller = AudioPlayerController()
+        defer { controller.shutdown() }
+        controller.addFiles([old])
+        let originalID = controller.items[0].id
+        expectTrue(controller.importDroppedFiles([second, first, first]))
+        expectEqual(controller.items.map(\.url), [old, first, second])
+        expectEqual(controller.currentID, controller.items[1].id)
+        expectEqual(controller.position, 0, accuracy: 0.1)
+        expectFalse(controller.autoAdvance)
+        let firstID = controller.items[1].id
+        controller.playItem(originalID)
+        controller.seek(to: 5)
+        expectTrue(controller.importDroppedFiles([first]))
+        expectEqual(controller.items.count, 3)
+        expectEqual(controller.currentID, firstID)
+        expectEqual(controller.position, 0, accuracy: 0.1)
+        let sameA = try fixture("same.m4a")
+        let sameB = try fixture("same.m4a")
+        expectTrue(controller.importDroppedFiles([sameB, sameA]))
+        expectEqual(controller.items.count, 5)
+        expectEqual(Set(controller.items.suffix(2).map(\.url)), Set([sameA, sameB]))
+        // Dropping an existing item must use the existing list's next item, not a hidden batch queue.
+        let queue = AudioPlayerController()
+        defer { queue.shutdown() }
+        let short = try fixture("01-short.m4a", seconds: 0.35)
+        let existingNext = try fixture("02-existing.m4a")
+        let added = try fixture("03-added.m4a")
+        queue.addFiles([short, existingNext])
+        queue.autoAdvance = true
+        let nextID = queue.items[1].id
+        expectTrue(queue.importDroppedFiles([added, short]))
+        expectTrue(try await waitForSession { queue.currentID == nextID })
+        expectTrue(queue.isPlaying)
+        expectEqual(queue.items.map(\.url), [short, existingNext, added])
+    }
+
+    @MainActor func testDroppedRejectionsAndBadFirstCandidate() async throws {
+        let old = try fixture("00-playing.m4a")
+        let root = old.deletingLastPathComponent()
+        let image = root.appendingPathComponent("photo.png")
+        let directory = root.appendingPathComponent("folder.mp3", isDirectory: true)
+        let missing = root.appendingPathComponent("missing.m4a")
+        try Data("not audio".utf8).write(to: image)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let controller = AudioPlayerController()
+        defer { controller.shutdown() }
+        controller.addFiles([old])
+        let oldID = controller.items[0].id
+        controller.playItem(oldID)
+        controller.seek(to: 2)
+        expectFalse(controller.importDroppedFiles([image, directory, missing, URL(string: "https://example.invalid/audio.mp3")!]))
+        expectEqual(controller.items.map(\.url), [old])
+        expectEqual(controller.currentID, oldID)
+        expectTrue(controller.isPlaying)
+        expectNotNil(controller.fileDrop.feedback)
+        let good = try fixture("02-good.m4a")
+        expectTrue(controller.importDroppedFiles([image, good, directory]))
+        expectEqual(controller.items.map(\.url), [old, good])
+        expectNotNil(controller.fileDrop.feedback)
+        controller.playItem(oldID)
+        let bad = root.appendingPathComponent("01-broken.m4a")
+        try Data("broken".utf8).write(to: bad)
+        expectFalse(controller.importDroppedFiles([good, bad]))
+        expectEqual(controller.items.count, 3)
+        expectEqual(controller.currentID, oldID)
+        expectTrue(controller.isPlaying)
+        expectNotNil(controller.errorMessage)
+        expectTrue(FileManager.default.fileExists(atPath: old.path))
+    }
+
+    @MainActor func testDroppedProviderOrderFailureAndAdmission() async throws {
+        let first = try fixture("01-first.m4a")
+        let second = try fixture("02-second.m4a")
+        let firstGate = DropProviderGate(url: first)
+        let secondGate = DropProviderGate(url: second)
+        let controller = AudioPlayerController()
+        defer { controller.shutdown() }
+        var submissions = 0
+        expectTrue(controller.receiveDroppedFiles([secondGate.provider, firstGate.provider], beforePlayback: { submissions += 1 }))
+        expectTrue(try await waitForSession { firstGate.wasRequested && secondGate.wasRequested })
+        secondGate.deliver()
+        expectTrue(controller.fileDrop.isLoading)
+        firstGate.deliver()
+        expectTrue(try await waitForSession { !controller.fileDrop.isLoading })
+        expectEqual(controller.items.map(\.url), [first, second])
+        expectEqual(controller.currentID, controller.items[0].id)
+        expectTrue(controller.isPlaying)
+        expectEqual(submissions, 1)
+        let third = try fixture("03-third.m4a")
+        let failed = DropProviderGate(fail: true)
+        expectTrue(controller.receiveDroppedFiles([failed.provider, dropProvider(third)]))
+        expectTrue(try await waitForSession { failed.wasRequested })
+        failed.deliver()
+        expectTrue(try await waitForSession { !controller.fileDrop.isLoading })
+        expectEqual(controller.items.count, 3)
+        expectEqual(controller.currentItem?.url, third)
+        expectNotNil(controller.fileDrop.feedback)
+        let previous = controller.currentID
+        expectFalse(controller.receiveDroppedFiles([dropProvider(first)], canAccept: { false }))
+        expectFalse(controller.receiveDroppedFiles([NSItemProvider(object: "plain text" as NSString)]))
+        expectEqual(controller.currentID, previous)
+        expectFalse(controller.fileDrop.isLoading)
+    }
+
+    @MainActor func testDroppedLateCallbacksCannotOverrideUserControls() async throws {
+        let old = try fixture("existing.m4a")
+        let late = try fixture("late.m4a")
+        for action in ["pause", "seek", "list"] {
+            let controller = AudioPlayerController()
+            defer { controller.shutdown() }
+            controller.addFiles([old])
+            let oldID = controller.items[0].id
+            controller.playItem(oldID)
+            controller.seek(to: 2)
+            let gate = DropProviderGate(url: late)
+            var submissions = 0
+            expectTrue(controller.receiveDroppedFiles([gate.provider], beforePlayback: { submissions += 1 }))
+            expectTrue(try await waitForSession { gate.wasRequested })
+            if action == "pause" { controller.togglePlayback() }
+            else if action == "seek" { controller.seek(to: 5) }
+            else { controller.addFiles([]) }
+            expectFalse(controller.fileDrop.isLoading)
+            gate.deliver()
+            // The callback has been explicitly delivered; allow its main-actor continuation to run.
+            try await Task.sleep(nanoseconds: 100_000_000)
+            expectEqual(controller.items.map(\.url), [old])
+            expectEqual(controller.currentID, oldID)
+            expectEqual(submissions, 0)
+            if action == "pause" { expectFalse(controller.isPlaying) }
+            else { expectTrue(controller.isPlaying) }
+        }
+    }
+
+    @MainActor func testDroppedNewBatchExitAndLateAdmission() async throws {
+        let old = try fixture("old.m4a")
+        let newest = try fixture("newest.m4a")
+        let staleGate = DropProviderGate(url: old)
+        let controller = AudioPlayerController()
+        defer { controller.shutdown() }
+        expectTrue(controller.receiveDroppedFiles([staleGate.provider]))
+        expectTrue(try await waitForSession { staleGate.wasRequested })
+        expectTrue(controller.receiveDroppedFiles([dropProvider(newest)]))
+        expectTrue(try await waitForSession { !controller.fileDrop.isLoading })
+        staleGate.deliver()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        expectEqual(controller.items.map(\.url), [newest])
+        expectTrue(controller.isPlaying)
+        let gated = AudioPlayerController()
+        defer { gated.shutdown() }
+        let gate = DropProviderGate(url: old)
+        var canAccept = true
+        expectTrue(gated.receiveDroppedFiles([gate.provider], canAccept: { canAccept }))
+        expectTrue(try await waitForSession { gate.wasRequested })
+        canAccept = false
+        gate.deliver()
+        expectTrue(try await waitForSession { !gated.fileDrop.isLoading })
+        expectTrue(gated.items.isEmpty)
+        expectFalse(gated.isPlaying)
+        let exiting = AudioPlayerController()
+        let exitGate = DropProviderGate(url: old)
+        expectTrue(exiting.receiveDroppedFiles([exitGate.provider]))
+        expectTrue(try await waitForSession { exitGate.wasRequested })
+        exiting.shutdown()
+        exitGate.deliver()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        expectTrue(exiting.items.isEmpty)
+        expectNil(exiting.currentID)
+        expectFalse(exiting.isPlaying)
+        expectFalse(exiting.fileDrop.isLoading)
+        expectFalse(exiting.receiveDroppedFiles([dropProvider(old)]))
+        let timedOut = FileDropImporter(timeout: 0.1)
+        let timeoutGate = DropProviderGate(url: old)
+        var timeoutSubmissions = 0
+        expectTrue(timedOut.start([timeoutGate.provider]) { _, _ in timeoutSubmissions += 1 })
+        expectTrue(try await waitForSession { timeoutGate.wasRequested })
+        expectTrue(try await waitForSession { !timedOut.isLoading })
+        expectNotNil(timedOut.feedback)
+        timeoutGate.deliver()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        expectEqual(timeoutSubmissions, 0)
+    }
+
+    @MainActor func testDroppedLocalReferenceBatchScale() async throws {
+        let source = try fixture("source.m4a")
+        let manager = FileManager.default
+        for count in [100, 1000] {
+            let directory = source.deletingLastPathComponent().appendingPathComponent("batch-\(count)", isDirectory: true)
+            try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+            let urls = try (1...count).map { index -> URL in
+                let url = directory.appendingPathComponent(String(format: "%04d-音频.m4a", index))
+                try manager.linkItem(at: source, to: url)
+                return url
+            }
+            let providers = urls.reversed().map { dropProvider($0) }
+            let controller = AudioPlayerController()
+            defer { controller.shutdown() }
+            // Provider construction and fixture setup precede the measured app import path.
+            let started = ProcessInfo.processInfo.systemUptime
+            expectTrue(controller.receiveDroppedFiles(providers))
+            // The importer has its own eight-second business timeout; allow that result to arrive.
+            expectTrue(try await waitForSession(timeout: 10) { !controller.fileDrop.isLoading })
+            let elapsed = ProcessInfo.processInfo.systemUptime - started
+            expectEqual(controller.items.count, count)
+            expectEqual(controller.items.first?.url, urls.first)
+            expectEqual(controller.currentItem?.url, urls.first)
+            expectTrue(controller.isPlaying)
+            expectNil(controller.errorMessage)
+            expectNil(controller.fileDrop.feedback)
+            controller.shutdown()
+            expectTrue(manager.fileExists(atPath: source.path))
+            expectTrue(urls.allSatisfy { manager.fileExists(atPath: $0.path) })
+            print("  DROP \(count) local hard-link references via NSItemProvider: import=\(elapsed)s received=\(controller.items.count)")
+        }
     }
 
 }

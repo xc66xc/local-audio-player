@@ -46,6 +46,13 @@ struct CheckRunner {
     @MainActor static func main() async {
         let suite = PlayerTests()
         let tests: [(String, @MainActor () async throws -> Void)] = [
+            ("拖入五种格式即播、重复当前项续播及暂停恢复", suite.testDroppedFormatsResumeAndPersistence),
+            ("多文件追加排序、重复路径与既有连播顺序", suite.testDroppedBatchOrderDuplicatesAndExistingQueue),
+            ("目录/非音频拒收、部分接受及坏首项不抢播", suite.testDroppedRejectionsAndBadFirstCandidate),
+            ("提供者乱序、部分失败及窗口接收条件", suite.testDroppedProviderOrderFailureAndAdmission),
+            ("迟到拖入回调不能覆盖手动暂停、跳转与列表操作", suite.testDroppedLateCallbacksCannotOverrideUserControls),
+            ("新拖入优先、退出及解析后窗口状态改变", suite.testDroppedNewBatchExitAndLateAdmission),
+            ("100/1000 个本地引用的异步拖入量级与原文件保留", suite.testDroppedLocalReferenceBatchScale),
             ("播放中真实重命名、保留数据与跨格式后续跳转", suite.testRenameActiveFormatsAndSeek),
             ("大小写改名、暂停断点、结尾和重启恢复", suite.testRenamePausedPersistenceAndCaseChange),
             ("同名不覆盖、非法名称、缺失与非当前曲目", suite.testRenameCollisionInvalidMissingAndInactive),

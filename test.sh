@@ -7,6 +7,7 @@ mkdir -p .build/checks
 bash build-decoder.sh
 swiftc -parse-as-library -o .build/checks/PlayerChecks \
   Sources/LocalAudioPlayer/AudioPlayback.swift \
+  Sources/LocalAudioPlayer/FileDropImporter.swift \
   Sources/LocalAudioPlayer/PlaylistItem.swift \
   Sources/LocalAudioPlayer/SessionStore.swift \
   Sources/LocalAudioPlayer/AudioPlayerController.swift \

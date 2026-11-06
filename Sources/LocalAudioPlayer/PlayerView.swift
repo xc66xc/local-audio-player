@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import AVFoundation
+import UniformTypeIdentifiers
 
 private enum PlayerStyle {
     static let accent = Color(red: 1, green: 0.18, blue: 0.34)
@@ -15,6 +16,19 @@ struct PlayerView: View {
     @ObservedObject var controller: AudioPlayerController
     let keyboard: WindowKeyboardHandler
     @State private var settingsShown = false
+    @State private var isDropTargeted = false
+    @ObservedObject private var fileDrop: FileDropImporter
+
+    init(controller: AudioPlayerController, keyboard: WindowKeyboardHandler) {
+        self.controller = controller
+        self.keyboard = keyboard
+        fileDrop = controller.fileDrop
+    }
+
+    private var canReceiveDrop: Bool {
+        controller.canImportDroppedFiles && keyboard.window?.isVisible == true &&
+            keyboard.window?.attachedSheet == nil && NSApp.modalWindow == nil
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -30,14 +44,16 @@ struct PlayerView: View {
         .tint(PlayerStyle.accent)
         .disabled(controller.isRestoring)
         .overlay(alignment: .top) {
-            if let notice = controller.sessionNotice {
-                HStack {
-                    Text(notice).font(.system(size: 12))
-                    Button("关闭") { controller.sessionNotice = nil }
+            VStack(spacing: 6) {
+                if let notice = controller.sessionNotice {
+                    feedbackBanner(notice) { controller.sessionNotice = nil }
                 }
-                .padding(12).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-                .padding(12)
-            }
+                if fileDrop.isLoading {
+                    feedbackBanner("正在添加音频…", closeTitle: "取消") { fileDrop.cancel() }
+                } else if let feedback = fileDrop.feedback {
+                    feedbackBanner(feedback) { fileDrop.feedback = nil }
+                }
+            }.padding(12)
         }
         .overlay(alignment: .bottomTrailing) {
             if settingsShown {
@@ -52,6 +68,36 @@ struct PlayerView: View {
                 }
             }
         }
+        .overlay {
+            if isDropTargeted && canReceiveDrop {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(PlayerStyle.accent.opacity(0.04))
+                        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(PlayerStyle.accent, lineWidth: 2))
+                    VStack(spacing: 12) {
+                        Image(systemName: "arrow.down.doc").font(.system(size: 30, weight: .medium))
+                        Text("松开即可播放").font(.system(size: 22, weight: .semibold))
+                        Text("拖入本地音频，自动加入播放列表").font(.system(size: 13))
+                    }
+                    .foregroundStyle(PlayerStyle.accent)
+                    .padding(28)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                }
+                .padding(10)
+                .allowsHitTesting(false)
+            }
+        }
+        .onDrop(of: [UTType.fileURL], isTargeted: $isDropTargeted) { providers in
+            guard canReceiveDrop else { return false }
+            let window = keyboard.window
+            return controller.receiveDroppedFiles(providers, canAccept: { [weak window] in
+                window?.isVisible == true && window?.attachedSheet == nil && NSApp.modalWindow == nil
+            }, beforePlayback: {
+                settingsShown = false
+                keyboard.cancelPress()
+            })
+        }
+        .onDisappear { fileDrop.cancel() }
         .onChange(of: settingsShown) { open in
             keyboard.shortcutsSuspended = open
             keyboard.cancelPress()
@@ -65,6 +111,14 @@ struct PlayerView: View {
         )) {
             Button("好", role: .cancel) { controller.errorMessage = nil }
         } message: { Text(controller.errorMessage ?? "") }
+    }
+
+    private func feedbackBanner(_ message: String, closeTitle: String = "关闭", close: @escaping () -> Void) -> some View {
+        HStack {
+            Text(message).font(.system(size: 12))
+            Button(closeTitle, action: close)
+        }
+        .padding(12).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func nowPlaying(artHeight: CGFloat) -> some View {
@@ -184,13 +238,13 @@ struct PlayerView: View {
                 VStack(spacing: 12) {
                     Image(systemName: "music.note.list").font(.system(size: 32, weight: .light))
                     Text("还没有音频").font(.headline)
-                    Text("点击右上角添加音频\n双击列表中的文件即可播放")
+                    Text("点击右上角添加，或将音频拖入窗口\n松开即可播放")
                         .font(.system(size: 12)).multilineTextAlignment(.center)
                 }
                 .foregroundStyle(PlayerStyle.muted)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(selection: $controller.selectedID) {
+                List(selection: Binding(get: { controller.selectedID }, set: { controller.selectItem($0) })) {
                     ForEach(Array(controller.items.enumerated()), id: \.element.id) { index, item in
                         AudioRow(item: item, index: index + 1,
                                  isCurrent: controller.currentID == item.id,
