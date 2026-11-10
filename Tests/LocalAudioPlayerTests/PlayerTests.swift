@@ -61,6 +61,271 @@ final class PlayerTests: CheckSuite {
         return url
     }
 
+    private func windowDefaults() throws -> UserDefaults {
+        let suite = "SonaWindowChecks-\(UUID())"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            throw NSError(domain: "WindowFixture", code: 1)
+        }
+        defaults.removePersistentDomain(forName: suite)
+        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
+        return defaults
+    }
+
+    @MainActor private func windowFixture() -> NSWindow {
+        _ = NSApplication.shared
+        let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let window = NSWindow(contentRect: NSRect(x: screen.minX + 20, y: screen.minY + 20,
+                                                  width: 1000, height: 650),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        // These AppKit windows are never ordered front; real SwiftUI layout/focus is checked in GUI QA.
+        return window
+    }
+
+    @MainActor func testMiniWindowFramesPinAndPreferences() async throws {
+        let defaults = try windowDefaults()
+        let window = windowFixture()
+        let modes = WindowModeCoordinator(defaults: defaults)
+        defer { modes.shutdown(); window.close() }
+        expectFalse(modes.isMini)
+        expectTrue(modes.isPinned)
+        modes.attach(to: window)
+        expectTrue(try await waitForSession { !modes.isTransitioning })
+        let original = window.frame
+        expectFalse(window.isVisible)
+
+        modes.toggle()
+        expectTrue(try await waitForSession { modes.isMini && !modes.isTransitioning })
+        expectEqual(window.level, .floating)
+        expectTrue(window.canBecomeKey)
+        expectLessThan(window.frame.height, 200)
+        let baseHeight = modes.miniContentHeight
+        modes.updateMiniSupplementHeight(28)
+        expectTrue(try await waitForSession { !modes.isTransitioning })
+        expectEqual(modes.miniContentHeight, baseHeight + 28, accuracy: 0.1)
+        modes.updateMiniSupplementHeight(0)
+        expectTrue(try await waitForSession { !modes.isTransitioning })
+        modes.togglePinned()
+        expectFalse(modes.isPinned)
+        expectEqual(window.level, .normal)
+
+        modes.toggle()
+        expectTrue(try await waitForSession { !modes.isMini && !modes.isTransitioning })
+        expectEqual(window.level, .normal)
+        expectEqual(window.frame.minX, original.minX, accuracy: 1.5)
+        expectEqual(window.frame.minY, original.minY, accuracy: 1.5)
+        expectEqual(window.frame.width, original.width, accuracy: 1.5)
+        expectEqual(window.frame.height, original.height, accuracy: 1.5)
+
+        modes.toggle()
+        expectTrue(try await waitForSession { modes.isMini && !modes.isTransitioning })
+        let compact = window.frame
+        modes.shutdown()
+        let restoredWindow = windowFixture()
+        let restored = WindowModeCoordinator(defaults: defaults)
+        defer { restored.shutdown(); restoredWindow.close() }
+        expectTrue(restored.isMini)
+        expectFalse(restored.isPinned)
+        restored.attach(to: restoredWindow)
+        expectTrue(try await waitForSession { !restored.isTransitioning })
+        expectEqual(restoredWindow.level, .normal)
+        expectEqual(restoredWindow.frame.minX, compact.minX, accuracy: 1.5)
+        expectEqual(restoredWindow.frame.minY, compact.minY, accuracy: 1.5)
+        expectEqual(restoredWindow.frame.width, compact.width, accuracy: 1.5)
+        expectFalse(restoredWindow.isVisible)
+    }
+
+    @MainActor func testMiniWindowKeepsAudioAndCancelsHold() async throws {
+        for (name, codec) in [("01.m4a", "aac"), ("01.opus", "libopus")] {
+            let window = windowFixture()
+            let modes = WindowModeCoordinator(defaults: try windowDefaults())
+            let controller = AudioPlayerController()
+            let keyboard = WindowKeyboardHandler()
+            defer { modes.shutdown(); keyboard.uninstall(); controller.shutdown(); window.close() }
+            modes.onWillSwitch = {
+                keyboard.cancelPress()
+                keyboard.shortcutsSuspended = false
+            }
+            modes.attach(to: window)
+            expectTrue(try await waitForSession { !modes.isTransitioning })
+            controller.addFiles([try encodedFixture(name, codec: codec, seconds: 30), try fixture("02.m4a")])
+            let a = controller.items[0].id
+            controller.load(a, autoplay: false)
+            controller.seek(to: 7)
+            controller.load(controller.items[1].id, autoplay: false)
+            controller.load(a, autoplay: false)
+
+            modes.toggle()
+            expectTrue(try await waitForSession { modes.isMini && !modes.isTransitioning })
+            expectEqual(controller.currentID, a)
+            expectEqual(controller.position, 0)
+            expectEqual(controller.pendingResume?.position, 7)
+            expectFalse(controller.isPlaying)
+            controller.acceptResume()
+            expectEqual(controller.position, 7, accuracy: 0.05)
+            expectFalse(controller.isPlaying)
+            controller.forwardSeconds = 13
+            controller.togglePlayback()
+            keyboard.pressRight(controller: controller)
+            try await Task.sleep(nanoseconds: 450_000_000)
+            expectTrue(controller.isBoosting)
+            let beforeSwitch = controller.position
+            keyboard.shortcutsSuspended = true
+            modes.toggle()
+            expectTrue(try await waitForSession { !modes.isMini && !modes.isTransitioning })
+            keyboard.releaseRight()
+            expectFalse(keyboard.shortcutsSuspended)
+            expectFalse(controller.isBoosting)
+            expectEqual(controller.playbackRate, Float(1))
+            expectTrue(controller.isPlaying)
+            expectEqual(controller.currentID, a)
+            try await Task.sleep(nanoseconds: 300_000_000)
+            expectGreaterThan(controller.position, beforeSwitch)
+            expectLessThan(controller.position, beforeSwitch + 3)
+            expectNil(controller.pendingResume)
+        }
+    }
+
+    @MainActor func testMiniWindowSwitchPreservesPendingDrop() async throws {
+        let window = windowFixture()
+        let modes = WindowModeCoordinator(defaults: try windowDefaults())
+        let controller = AudioPlayerController()
+        let keyboard = WindowKeyboardHandler()
+        defer { modes.shutdown(); keyboard.uninstall(); controller.shutdown(); window.close() }
+        modes.onWillSwitch = { keyboard.cancelPress() }
+        modes.attach(to: window)
+        expectTrue(try await waitForSession { !modes.isTransitioning })
+        let gate = DropProviderGate(url: try fixture("小窗拖入.m4a"))
+        expectTrue(controller.receiveDroppedFiles([gate.provider]))
+        expectTrue(try await waitForSession { gate.wasRequested })
+        modes.toggle()
+        expectTrue(try await waitForSession { modes.isMini && !modes.isTransitioning })
+        expectTrue(controller.fileDrop.isLoading)
+        gate.deliver()
+        expectTrue(try await waitForSession { !controller.fileDrop.isLoading })
+        expectEqual(controller.items.count, 1)
+        expectTrue(controller.isPlaying)
+        expectEqual(controller.currentItem?.name, "小窗拖入.m4a")
+        // This covers shared state; production root-view survival and actual drop targets require GUI QA.
+    }
+
+    @MainActor func testMiniWindowRestoresModeAndPausedSession() async throws {
+        let defaults = try windowDefaults()
+        let store = try sessionStore()
+        let window = windowFixture()
+        let modes = WindowModeCoordinator(defaults: defaults)
+        let original = AudioPlayerController(sessionStore: store)
+        defer { modes.shutdown(); original.shutdown(); window.close() }
+        modes.attach(to: window)
+        expectTrue(try await waitForSession { !modes.isTransitioning })
+        await original.restoreSession()
+        original.addFiles([try fixture("01.m4a"), try fixture("02.m4a")])
+        let a = original.items[0].id
+        original.load(a, autoplay: false)
+        original.seek(to: 7)
+        original.load(original.items[1].id, autoplay: false)
+        original.load(a, autoplay: true)
+        try await Task.sleep(nanoseconds: 350_000_000)
+        original.togglePlayback()
+        let actual = original.position
+        modes.toggle()
+        expectTrue(try await waitForSession { modes.isMini && !modes.isTransitioning })
+        expectEqual(original.pendingResume?.position, 7)
+        original.shutdown()
+        modes.shutdown()
+        window.close()
+
+        let restoredWindow = windowFixture()
+        let restoredModes = WindowModeCoordinator(defaults: defaults)
+        let restored = AudioPlayerController(sessionStore: SessionStore(fileURL: store.fileURL))
+        defer { restoredModes.shutdown(); restored.shutdown(); restoredWindow.close() }
+        restoredModes.attach(to: restoredWindow)
+        await restored.restoreSession()
+        expectTrue(try await waitForSession { !restoredModes.isTransitioning })
+        expectTrue(restoredModes.isMini)
+        expectEqual(restored.currentID, a)
+        expectEqual(restored.position, actual, accuracy: 0.1)
+        expectEqual(restored.pendingResume?.position, 7)
+        expectFalse(restored.isPlaying)
+        restored.acceptResume()
+        expectEqual(restored.position, 7, accuracy: 0.05)
+        expectFalse(restored.isPlaying)
+    }
+
+    @MainActor func testMiniWindowShutdownCancelsPendingLayout() async throws {
+        let defaults = try windowDefaults()
+        let window = windowFixture()
+        let modes = WindowModeCoordinator(defaults: defaults)
+        defer { modes.shutdown(); window.close() }
+        modes.attach(to: window)
+        expectTrue(try await waitForSession { !modes.isTransitioning })
+        modes.toggle()
+        modes.shutdown()
+        let stoppedFrame = window.frame
+        try await Task.sleep(nanoseconds: 350_000_000)
+        expectEqual(window.frame, stoppedFrame)
+        expectFalse(window.isVisible)
+        let fresh = WindowModeCoordinator(defaults: defaults)
+        expectFalse(fresh.isMini)
+        fresh.shutdown()
+    }
+
+    @MainActor func testMiniWindowNativeFullScreenTimeoutAllowsRetry() async throws {
+        let window = windowFixture()
+        let modes = WindowModeCoordinator(defaults: try windowDefaults())
+        defer { modes.shutdown(); window.close() }
+        modes.attach(to: window)
+        expectTrue(try await waitForSession { !modes.isTransitioning })
+
+        // Simulate AppKit announcing a native transition whose completion never arrives.
+        // The hidden fixture never actually enters a desktop fullscreen space.
+        NotificationCenter.default.post(name: NSWindow.willEnterFullScreenNotification, object: window)
+        modes.toggle()
+        expectFalse(modes.isMini)
+
+        // Wait for the watchdog's recovery feedback rather than assuming exact scheduling.
+        let blockedNotice = modes.notice
+        expectTrue(try await waitForSession(timeout: 10) { modes.notice != blockedNotice })
+        modes.toggle()
+        expectTrue(try await waitForSession(timeout: 1.5) { modes.isMini && !modes.isTransitioning })
+        expectFalse(window.isVisible)
+    }
+
+    @MainActor func testMiniWindowScreenCorrectionAndInvalidPreferences() throws {
+        let primary = NSRect(x: 0, y: 24, width: 1440, height: 876)
+        let secondary = NSRect(x: 1440, y: 0, width: 1280, height: 800)
+        let compact = NSRect(x: 1800, y: 40, width: 560, height: 96)
+        let minimum = NSSize(width: 480, height: 96)
+        expectEqual(WindowModeCoordinator.correctedFrame(compact, minimumSize: minimum,
+                                                        visibleFrames: [primary, secondary]), compact)
+        let afterDisconnect = WindowModeCoordinator.correctedFrame(compact, minimumSize: minimum,
+                                                                   visibleFrames: [primary])
+        expectTrue(primary.contains(afterDisconnect))
+        expectEqual(afterDisconnect.size, compact.size)
+        let oversized = WindowModeCoordinator.correctedFrame(
+            NSRect(x: -3000, y: -4000, width: 5000, height: 6000),
+            minimumSize: minimum, visibleFrames: [primary])
+        expectEqual(oversized, primary)
+        let invalid = WindowModeCoordinator.correctedFrame(
+            NSRect(x: CGFloat.nan, y: 0, width: -1, height: 0),
+            minimumSize: minimum, visibleFrames: [primary])
+        expectTrue(primary.contains(invalid))
+        expectEqual(invalid.size, minimum)
+
+        let defaults = try windowDefaults()
+        defaults.set("unknown-mode", forKey: WindowModeCoordinator.PreferenceKey.mode)
+        defaults.set([-100, 50, -1, 700], forKey: WindowModeCoordinator.PreferenceKey.mainFrame)
+        defaults.set([1, 2], forKey: WindowModeCoordinator.PreferenceKey.miniFrame)
+        defaults.set("not-a-boolean", forKey: WindowModeCoordinator.PreferenceKey.pinned)
+        let modes = WindowModeCoordinator(defaults: defaults)
+        defer { modes.shutdown() }
+        expectFalse(modes.isMini)
+        expectTrue(modes.isPinned)
+        expectGreaterThan(modes.preferredInitialSize.width, 0)
+        expectGreaterThan(modes.preferredInitialSize.height, 0)
+    }
+
     @MainActor func testMainstreamFormatsTransport() async throws {
         let formats: [(String, String, [String])] = [
             ("vbr.mp3", "libmp3lame", ["-q:a", "4"]),

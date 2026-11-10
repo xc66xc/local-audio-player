@@ -46,6 +46,13 @@ struct CheckRunner {
     @MainActor static func main() async {
         let suite = PlayerTests()
         let tests: [(String, @MainActor () async throws -> Void)] = [
+            ("小窗尺寸往返、图钉层级与独立偏好恢复", suite.testMiniWindowFramesPinAndPreferences),
+            ("小窗切换保留原生/Opus播放和续听、取消长按不快进", suite.testMiniWindowKeepsAudioAndCancelsHold),
+            ("切换小窗期间仍完成已接收的异步拖入", suite.testMiniWindowSwitchPreservesPendingDrop),
+            ("重启恢复小窗模式、实际位置与待选续听且暂停", suite.testMiniWindowRestoresModeAndPausedSession),
+            ("关闭期间取消迟到的小窗布局与偏好提交", suite.testMiniWindowShutdownCancelsPendingLayout),
+            ("原生全屏未收到完成事件时超时恢复小窗切换", suite.testMiniWindowNativeFullScreenTimeoutAllowsRetry),
+            ("显示器断开、越界窗口与损坏窗口偏好校正", { try suite.testMiniWindowScreenCorrectionAndInvalidPreferences() }),
             ("每首独立续听、原生/Opus 跳转及播放状态保留", suite.testPerTrackResumeSwitchAndAccept),
             ("待选旧断点切歌不覆盖、重启恢复当前位置且暂停", suite.testPerTrackResumePendingSurvivesSwitchAndRestart),
             ("周期检查点保留旧续听点且不重写完整库", suite.testPerTrackResumePeriodicCheckpointProtectsOffer),
