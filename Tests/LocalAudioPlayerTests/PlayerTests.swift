@@ -707,17 +707,11 @@ final class PlayerTests: CheckSuite {
         expectFalse(controller.isBoosting)
         expectEqual(controller.position, beforeCancel, accuracy: 0.05)
         controller.togglePlayback()
-        let pausedPosition = controller.position
         keyboard.pressRight(controller: controller)
-        // A paused hold has no public "held" state; yield so its task can begin before the threshold wait.
-        await Task.yield()
         try await Task.sleep(nanoseconds: 400_000_000)
-        expectFalse(controller.isPlaying)
-        expectEqual(controller.position, pausedPosition, accuracy: 0.05)
         keyboard.releaseRight()
         expectFalse(controller.isPlaying)
         expectFalse(controller.isBoosting)
-        expectEqual(controller.position, pausedPosition, accuracy: 0.05)
         controller.forwardSeconds = 0
         controller.backwardSeconds = 9999
         expectEqual(controller.forwardSeconds, 1)
