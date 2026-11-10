@@ -168,8 +168,7 @@ final class PlayerTests: CheckSuite {
             controller.forwardSeconds = 13
             controller.togglePlayback()
             keyboard.pressRight(controller: controller)
-            try await Task.sleep(nanoseconds: 450_000_000)
-            expectTrue(controller.isBoosting)
+            expectTrue(try await waitForSession { controller.isBoosting })
             let beforeSwitch = controller.position
             keyboard.shortcutsSuspended = true
             modes.toggle()
@@ -691,24 +690,34 @@ final class PlayerTests: CheckSuite {
         controller.holdRate = 1.5
         controller.togglePlayback()
         keyboard.pressRight(controller: controller)
-        try await Task.sleep(nanoseconds: 450_000_000)
-        expectTrue(controller.isBoosting)
+        // Wait for the held action itself; a busy CI executor may start its task late.
+        expectTrue(try await waitForSession { controller.isBoosting })
         expectEqual(controller.playbackRate, Float(1.5))
+        let beforeRelease = controller.position
         keyboard.releaseRight()
         expectFalse(controller.isBoosting)
         expectEqual(controller.playbackRate, Float(1))
-        expectLessThan(controller.position, 9)
+        expectEqual(controller.position, beforeRelease, accuracy: 0.05)
         keyboard.pressRight(controller: controller)
-        try await Task.sleep(nanoseconds: 400_000_000)
+        expectTrue(try await waitForSession { controller.isBoosting })
+        let beforeCancel = controller.position
         keyboard.cancelPress()
+        keyboard.releaseRight()
         expectEqual(controller.playbackRate, Float(1))
         expectFalse(controller.isBoosting)
+        expectEqual(controller.position, beforeCancel, accuracy: 0.05)
         controller.togglePlayback()
+        let pausedPosition = controller.position
         keyboard.pressRight(controller: controller)
+        // A paused hold has no public "held" state; yield so its task can begin before the threshold wait.
+        await Task.yield()
         try await Task.sleep(nanoseconds: 400_000_000)
+        expectFalse(controller.isPlaying)
+        expectEqual(controller.position, pausedPosition, accuracy: 0.05)
         keyboard.releaseRight()
         expectFalse(controller.isPlaying)
         expectFalse(controller.isBoosting)
+        expectEqual(controller.position, pausedPosition, accuracy: 0.05)
         controller.forwardSeconds = 0
         controller.backwardSeconds = 9999
         expectEqual(controller.forwardSeconds, 1)
