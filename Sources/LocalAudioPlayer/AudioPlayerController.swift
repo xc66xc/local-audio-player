@@ -16,6 +16,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     @Published var sessionNotice: String?
     @Published private(set) var isRestoring = false
     @Published private(set) var isChoosingFiles = false
+    @Published private(set) var pendingResume: PendingResume?
 
     @Published var forwardSeconds = 5 { didSet { if !(1...600).contains(forwardSeconds) { forwardSeconds = min(max(forwardSeconds, 1), 600) }; scheduleSave() } }
     @Published var backwardSeconds = 5 { didSet { if !(1...600).contains(backwardSeconds) { backwardSeconds = min(max(backwardSeconds, 1), 600) }; scheduleSave() } }
@@ -37,6 +38,8 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     let fileDrop = FileDropImporter()
 
     private var player: (any AudioPlayback)?
+    private var resumePositions: [UUID: ResumePosition] = [:]
+    private var currentFileStamp: FileStamp?
     private var ticker: Timer?
     private var scopedURLs: Set<URL> = []
     private let logger = Logger(subsystem: "local.miniaudio.player", category: "Playback")
@@ -47,6 +50,78 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     private var hasRestored = false
     private var isShuttingDown = false
     private var saveErrorShown = false
+
+    enum LoadReason { case switching, restoration, reloading }
+
+    private struct FileStamp {
+        var size: Int64?
+        var modificationTime: TimeInterval?
+    }
+
+    private var actualPosition: TimeInterval {
+        PlaybackRules.position(isPlaying ? (player?.currentTime ?? position) : position, duration: duration)
+    }
+
+    private func fileStamp(for url: URL) -> FileStamp? {
+        do {
+            let values = try url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            return FileStamp(size: values.fileSize.map { Int64($0) },
+                             modificationTime: values.contentModificationDate?.timeIntervalSince1970)
+        } catch {
+            logger.error("[error] [resume.identity] \(String(describing: error), privacy: .private)")
+            return nil
+        }
+    }
+
+    private func isValidResume(_ saved: ResumePosition, duration: TimeInterval, stamp: FileStamp?) -> Bool {
+        guard saved.position.isFinite, saved.duration.isFinite, saved.position >= 5,
+              saved.position < saved.duration, duration.isFinite, saved.position < duration else { return false }
+        if let oldSize = saved.fileSize, let newSize = stamp?.size, oldSize != newSize { return false }
+        if let oldTime = saved.modificationTime, let newTime = stamp?.modificationTime,
+           oldTime != newTime { return false }
+        return true
+    }
+
+    @discardableResult
+    private func resolveReachedResume(at time: TimeInterval) -> Bool {
+        guard let pendingResume, pendingResume.itemID == currentID, time >= pendingResume.position else { return false }
+        self.pendingResume = nil
+        return true
+    }
+
+    /// Archive only at visit boundaries; a pending offer protects the previous listening point.
+    private func archiveCurrentPosition(at time: TimeInterval? = nil) {
+        guard let id = currentID else { return }
+        let time = PlaybackRules.position(time ?? actualPosition, duration: duration)
+        resolveReachedResume(at: time)
+        guard pendingResume?.itemID != id else { return }
+        if time >= 5, time < duration {
+            let previous = resumePositions[id]
+            resumePositions[id] = ResumePosition(position: time, duration: duration,
+                fileSize: currentFileStamp?.size ?? previous?.fileSize,
+                modificationTime: currentFileStamp?.modificationTime ?? previous?.modificationTime)
+        } else {
+            resumePositions[id] = nil
+        }
+    }
+
+    func acceptResume() {
+        guard let offer = pendingResume, offer.itemID == currentID,
+              offer.position >= 5, offer.position < duration else { return }
+        if movePlayhead(to: offer.position, adoptingPosition: false) {
+            pendingResume = nil
+            scheduleSave()
+            logger.info("[resume.accept] item=\(offer.itemID.uuidString, privacy: .public)")
+        }
+    }
+
+    func dismissResume() {
+        guard let offer = pendingResume, offer.itemID == currentID else { return }
+        fileDrop.cancel()
+        pendingResume = nil
+        scheduleSave()
+        logger.info("[resume.dismiss] item=\(offer.itemID.uuidString, privacy: .public)")
+    }
 
     init(sessionStore: SessionStore? = nil) {
         self.sessionStore = sessionStore
@@ -69,24 +144,31 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         forwardSeconds = saved.forwardSeconds
         backwardSeconds = saved.backwardSeconds
         holdRate = saved.holdRate
+        resumePositions = saved.resumePositions
+        pendingResume = saved.pendingResume
         currentID = saved.currentID
         position = saved.position
         duration = saved.duration
         // Missing files retain their saved place. Never resume or auto-advance during restoration.
         if let id = saved.currentID, let item = currentItem, !item.isUnavailable,
-           load(id, autoplay: false) {
-            seek(to: PlaybackRules.position(saved.position, duration: duration))
+           load(id, autoplay: false, reason: .restoration) {
+            movePlayhead(to: saved.position, adoptingPosition: false)
         }
+        // A small checkpoint may contain a newer current point than the archived table.
+        // Keep the archive frozen when the user still has an earlier offer to choose.
+        archiveCurrentPosition()
         selectedID = saved.selectedID
         logger.info("[session.restore] paused=true count=\(self.items.count)")
     }
 
     private func snapshot() -> SavedSession {
-        let time = isPlaying ? (player?.currentTime ?? position) : position
+        let time = actualPosition
+        resolveReachedResume(at: time)
         return SavedSession(items: items, selectedID: selectedID, currentID: currentID,
                             position: PlaybackRules.position(time, duration: duration), duration: duration,
                             autoAdvance: autoAdvance, forwardSeconds: forwardSeconds,
-                            backwardSeconds: backwardSeconds, holdRate: holdRate)
+                            backwardSeconds: backwardSeconds, holdRate: holdRate,
+                            resumePositions: resumePositions, pendingResume: pendingResume)
     }
 
     private func scheduleSave() {
@@ -189,13 +271,17 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         if accessed { scopedURLs.insert(url) }
         items[index] = PlaylistItem(url: url, id: id)
         if currentID == id {
-            let savedPosition = position
-            guard load(id, autoplay: false) else {
+            let savedPosition = actualPosition
+            guard load(id, autoplay: false, reason: .reloading) else {
                 items[index] = previousItem
                 if accessed { url.stopAccessingSecurityScopedResource(); scopedURLs.remove(url) }
                 return
             }
-            seek(to: min(savedPosition, duration))
+            movePlayhead(to: savedPosition, adoptingPosition: false)
+        } else if let point = resumePositions[id] {
+            // Relocating the same bytes keeps the point; replacing them invalidates it.
+            let stamp = fileStamp(for: url)
+            if !isValidResume(point, duration: point.duration, stamp: stamp) { resumePositions[id] = nil }
         }
         if changedURL, let scoped = scopedURLs.first(where: { $0.standardizedFileURL == previousURL.standardizedFileURL }) {
             scoped.stopAccessingSecurityScopedResource()
@@ -273,8 +359,8 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
             (player as? AVAudioPlayer)?.delegate = nil
             player?.stop()
             player = nil
-            if load(id, autoplay: false) {
-                seek(to: savedPosition)
+            if load(id, autoplay: false, reason: .reloading) {
+                movePlayhead(to: savedPosition, adoptingPosition: false)
                 if wasPlaying { resume() }
             }
         }
@@ -350,6 +436,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         guard let id = selectedID, let index = items.firstIndex(where: { $0.id == id }) else { return }
         let item = items[index]
         if currentID == id { clearPlayback() }
+        resumePositions[id] = nil
         items.remove(at: index)
         if let scoped = scopedURLs.first(where: { $0.standardizedFileURL == item.url }) {
             scoped.stopAccessingSecurityScopedResource()
@@ -360,7 +447,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     }
 
     @discardableResult
-    func load(_ id: UUID, autoplay: Bool) -> Bool {
+    func load(_ id: UUID, autoplay: Bool, reason: LoadReason = .switching) -> Bool {
         guard let item = items.first(where: { $0.id == id }) else { return false }
         do {
             let candidate: any AudioPlayback
@@ -384,14 +471,28 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
             endBoost()
             let previous = player
             previous?.pause()
+            let previousPosition = actualPosition
             if autoplay && !candidate.play() {
                 if isPlaying { _ = previous?.play() }
                 throw PlaybackError.cannotPlay
+            }
+            let startsVisit = reason == .switching && currentID != id
+            if startsVisit { archiveCurrentPosition(at: previousPosition) }
+            let stamp = fileStamp(for: item.url)
+            let saved = resumePositions[id].flatMap { isValidResume($0, duration: candidate.duration, stamp: stamp) ? $0 : nil }
+            if saved == nil { resumePositions[id] = nil }
+            if startsVisit {
+                pendingResume = saved.map { PendingResume(itemID: id, position: $0.position) }
+                if saved != nil { logger.info("[resume.offer] item=\(id.uuidString, privacy: .public)") }
+            } else if let offer = pendingResume,
+                      offer.itemID != id || saved == nil || offer.position >= candidate.duration {
+                pendingResume = nil
             }
             (previous as? AVAudioPlayer)?.delegate = nil
             previous?.stop()
             stopTicker()
             player = candidate
+            currentFileStamp = stamp
             currentID = id
             selectedID = id
             duration = candidate.duration
@@ -423,6 +524,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
             endBoost()
             player?.pause()
             position = player?.currentTime ?? position
+            resolveReachedResume(at: position)
             isPlaying = false
             stopTicker()
         } else if currentID != nil {
@@ -436,15 +538,15 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     private func resumeCurrent() {
         if player == nil, let id = currentID {
             let savedPosition = position
-            guard load(id, autoplay: false) else { return }
-            seek(to: savedPosition >= duration ? 0 : savedPosition)
+            guard load(id, autoplay: false, reason: .reloading) else { return }
+            movePlayhead(to: savedPosition >= duration ? 0 : savedPosition, adoptingPosition: false)
         }
         resume()
     }
 
     private func resume() {
         guard let player else { return }
-        if position >= duration { player.currentTime = 0; position = 0 }
+        if position >= duration { player.currentTime = 0; position = 0; pendingResume = nil }
         guard player.play() else {
             report("音频无法开始播放，请检查音频输出设备后重试。", error: PlaybackError.cannotPlay)
             return
@@ -459,13 +561,18 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     }
 
     func seek(to value: TimeInterval) {
+        movePlayhead(to: value, adoptingPosition: true)
+    }
+
+    @discardableResult
+    private func movePlayhead(to value: TimeInterval, adoptingPosition: Bool) -> Bool {
         fileDrop.cancel()
         defer { scheduleSave() }
-        let target = PlaybackRules.position(value, duration: duration)
         if player == nil, let id = currentID {
-            guard load(id, autoplay: false) else { return }
+            guard load(id, autoplay: false, reason: .reloading) else { return false }
         }
-        guard let player else { return }
+        guard let player else { return false }
+        let target = PlaybackRules.position(value, duration: duration)
         if target >= duration {
             // Invalidate completion callbacks for the previous playback session.
             endBoost()
@@ -474,11 +581,17 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
             self.player = nil
             isPlaying = false
             position = duration
+            pendingResume = nil
             stopTicker()
-            return
+            return true
         }
+        let wasPlaying = isPlaying
         player.currentTime = target
+        // A stream seek can synchronously report a decoder restart failure.
+        guard !wasPlaying || isPlaying else { return false }
         position = target
+        if adoptingPosition { pendingResume = nil }
+        return true
     }
 
     // Identity protects against a delayed completion from a replaced player.
@@ -488,15 +601,26 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
 
     private func handleFinished(_ finishedPlayer: any AudioPlayback, successfully flag: Bool) {
         guard finishedPlayer === player else { return }
+        let observedPosition = actualPosition
+        let lastPosition = position
         endBoost()
         isPlaying = false
         stopTicker()
-        position = duration
-        scheduleSave()
         guard flag else {
+            position = observedPosition < duration ? max(lastPosition, observedPosition) : lastPosition
+            // Failed decoders may reset their internal clock. Rebuild at the retained
+            // position on the next play instead of resuming that failed transport.
+            (finishedPlayer as? AVAudioPlayer)?.delegate = nil
+            finishedPlayer.stop()
+            player = nil
+            scheduleSave()
             report("音频播放中断，请重新打开文件。", error: PlaybackError.unreadable)
             return
         }
+        position = duration
+        pendingResume = nil
+        if let id = currentID { resumePositions[id] = nil }
+        scheduleSave()
         guard let id = currentID,
               let next = PlaybackRules.nextID(after: id, in: items, autoAdvance: autoAdvance) else { return }
         load(next, autoplay: true)
@@ -510,6 +634,11 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         guard failedPlayer === player else { return }
         endBoost()
         failedPlayer.pause()
+        let observedPosition = PlaybackRules.position(failedPlayer.currentTime, duration: duration)
+        if observedPosition < duration { position = max(position, observedPosition) }
+        failedPlayer.delegate = nil
+        failedPlayer.stop()
+        player = nil
         isPlaying = false
         stopTicker()
         scheduleSave()
@@ -520,6 +649,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         fileDrop.cancel()
         guard !isShuttingDown else { return }
         pendingSave?.cancel()
+        if !isRestoring { archiveCurrentPosition() }
         if !isRestoring, let sessionStore { showSaveError(sessionStore.flush(snapshot())) }
         isShuttingDown = true
         clearPlayback()
@@ -533,6 +663,8 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         (player as? AVAudioPlayer)?.delegate = nil
         player?.stop()
         player = nil
+        currentFileStamp = nil
+        pendingResume = nil
         currentID = nil
         position = 0
         duration = 0
@@ -545,6 +677,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
             Task { @MainActor in
                 guard let self, self.isPlaying, let player = self.player else { return }
                 self.position = player.currentTime
+                if self.resolveReachedResume(at: self.position) { self.scheduleSave() }
                 if Date().timeIntervalSince(self.lastPeriodicSave) >= 5 { self.saveSession() }
             }
         }

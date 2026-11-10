@@ -46,6 +46,16 @@ struct CheckRunner {
     @MainActor static func main() async {
         let suite = PlayerTests()
         let tests: [(String, @MainActor () async throws -> Void)] = [
+            ("每首独立续听、原生/Opus 跳转及播放状态保留", suite.testPerTrackResumeSwitchAndAccept),
+            ("待选旧断点切歌不覆盖、重启恢复当前位置且暂停", suite.testPerTrackResumePendingSurvivesSwitchAndRestart),
+            ("周期检查点保留旧续听点且不重写完整库", suite.testPerTrackResumePeriodicCheckpointProtectsOffer),
+            ("关闭续听与主动跳转后采用新位置", suite.testPerTrackResumeDismissAndManualSeek),
+            ("失败切歌保留提示、同 ID 改名与移除清理", suite.testPerTrackResumeFailureRenameAndRemoval),
+            ("自然追过旧断点及播完清理续听", suite.testPerTrackResumeNaturalCatchUpAndCompletion),
+            ("真实 Opus 解码进程失败后保留旧提示并恢复本次实际进度", suite.testPerTrackResumeDecoderFailureCanReplayActualPosition),
+            ("音频替换变短与重新定位不误用旧断点", suite.testPerTrackResumeChangedFileAndRelocation),
+            ("v1 最新断点迁移及混合版本 digest 隔离", suite.testResumeSchemaOneMigrationAndMixedSnapshots),
+            ("单条无效续听不丢失播放列表", suite.testResumeInvalidEntriesDoNotDiscardLibrary),
             ("拖入五种格式即播、重复当前项续播及暂停恢复", suite.testDroppedFormatsResumeAndPersistence),
             ("多文件追加排序、重复路径与既有连播顺序", suite.testDroppedBatchOrderDuplicatesAndExistingQueue),
             ("目录/非音频拒收、部分接受及坏首项不抢播", suite.testDroppedRejectionsAndBadFirstCandidate),
