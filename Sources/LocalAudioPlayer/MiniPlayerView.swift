@@ -37,7 +37,7 @@ struct MiniPlayerView: View {
     }
 
     private var mainStrip: some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .center, spacing: 10) {
             VStack(spacing: 0) {
                 Button {
                     keyboard.cancelPress()
@@ -56,12 +56,10 @@ struct MiniPlayerView: View {
             }
             .frame(width: 18)
 
-            VStack(spacing: 0) {
-                artwork
-                    .padding(.top, 8)
-                MiniWindowDragRegion()
-            }
-            .frame(width: 46)
+            artwork
+                .frame(width: 46)
+                .frame(maxHeight: .infinity, alignment: .center)
+                .background(MiniWindowDragRegion())
 
             VStack(spacing: 3) {
                 HStack(spacing: 10) {
@@ -113,7 +111,6 @@ struct MiniPlayerView: View {
         .clipped()
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .accessibilityHidden(true)
-        .background(MiniWindowDragRegion())
     }
 
     private var trackInformation: some View {
