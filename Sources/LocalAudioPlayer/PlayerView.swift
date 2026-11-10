@@ -3,7 +3,7 @@ import AppKit
 import AVFoundation
 import UniformTypeIdentifiers
 
-private enum PlayerStyle {
+enum PlayerStyle {
     static let accent = Color(red: 1, green: 0.18, blue: 0.34)
     static let selected = Color(red: 1, green: 0.93, blue: 0.95)
     static let canvas = Color(nsColor: .textBackgroundColor)
@@ -14,14 +14,17 @@ private enum PlayerStyle {
 
 struct PlayerView: View {
     @ObservedObject var controller: AudioPlayerController
+    @ObservedObject var windowMode: WindowModeCoordinator
     let keyboard: WindowKeyboardHandler
     @State private var settingsShown = false
     @State private var isDropTargeted = false
+    @State private var feedbackDetail: String?
     @ObservedObject private var fileDrop: FileDropImporter
 
-    init(controller: AudioPlayerController, keyboard: WindowKeyboardHandler) {
+    init(controller: AudioPlayerController, keyboard: WindowKeyboardHandler, windowMode: WindowModeCoordinator) {
         self.controller = controller
         self.keyboard = keyboard
+        self.windowMode = windowMode
         fileDrop = controller.fileDrop
     }
 
@@ -30,33 +33,62 @@ struct PlayerView: View {
             keyboard.window?.attachedSheet == nil && NSApp.modalWindow == nil
     }
 
+    private var hasResumeReminder: Bool {
+        controller.pendingResume?.itemID == controller.currentID && controller.pendingResume != nil &&
+            controller.currentItem?.isUnavailable == false
+    }
+
+    private var miniStatusMessage: String? {
+        if fileDrop.isLoading { return "正在添加音频…" }
+        return windowMode.notice ?? controller.sessionNotice ?? fileDrop.feedback
+    }
+
+    private var miniSupplementHeight: CGFloat {
+        (hasResumeReminder ? 28 : 0) + (miniStatusMessage != nil ? 28 : 0)
+    }
+
     var body: some View {
-        GeometryReader { geometry in
-            HStack(spacing: 0) {
-                nowPlaying(artHeight: min(330, max(160, geometry.size.height - 400)))
-                    .frame(width: geometry.size.width * 0.5)
-                Divider()
-                playlist.frame(maxWidth: .infinity, maxHeight: .infinity)
+        VStack(spacing: 0) {
+            if windowMode.isMini {
+                MiniPlayerView(controller: controller, windowMode: windowMode, keyboard: keyboard)
+                if let message = miniStatusMessage { miniFeedbackBar(message) }
+            } else {
+                GeometryReader { geometry in
+                    HStack(spacing: 0) {
+                        nowPlaying(artHeight: min(330, max(160, geometry.size.height - 400)))
+                            .frame(width: geometry.size.width * 0.5)
+                        Divider()
+                        playlist.frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
             }
         }
-        .frame(minWidth: 860, minHeight: 620)
+        .frame(minWidth: windowMode.isMini ? 480 : 860,
+               minHeight: windowMode.isMini ? 96 + miniSupplementHeight : 620,
+               maxHeight: windowMode.isMini ? 96 + miniSupplementHeight : .infinity)
+        .ignoresSafeArea(.container, edges: windowMode.isMini ? .top : [])
         .background(PlayerStyle.canvas)
         .tint(PlayerStyle.accent)
         .disabled(controller.isRestoring)
         .overlay(alignment: .top) {
-            VStack(spacing: 6) {
-                if let notice = controller.sessionNotice {
-                    feedbackBanner(notice) { controller.sessionNotice = nil }
-                }
-                if fileDrop.isLoading {
-                    feedbackBanner("正在添加音频…", closeTitle: "取消") { fileDrop.cancel() }
-                } else if let feedback = fileDrop.feedback {
-                    feedbackBanner(feedback) { fileDrop.feedback = nil }
-                }
-            }.padding(12)
+            if !windowMode.isMini {
+                VStack(spacing: 6) {
+                    if let notice = windowMode.notice {
+                        feedbackBanner(notice) { windowMode.notice = nil }
+                    }
+                    if let notice = controller.sessionNotice {
+                        feedbackBanner(notice) { controller.sessionNotice = nil }
+                    }
+                    if fileDrop.isLoading {
+                        feedbackBanner("正在添加音频…", closeTitle: "取消") { fileDrop.cancel() }
+                    } else if let feedback = fileDrop.feedback {
+                        feedbackBanner(feedback) { fileDrop.feedback = nil }
+                    }
+                }.padding(12)
+            }
         }
         .overlay(alignment: .bottomTrailing) {
-            if settingsShown {
+            if settingsShown && !windowMode.isMini {
                 ZStack(alignment: .bottomTrailing) {
                     Color.black.opacity(0.001).onTapGesture { settingsShown = false }
                     PlaybackSettings(controller: controller)
@@ -74,13 +106,17 @@ struct PlayerView: View {
                     RoundedRectangle(cornerRadius: 16)
                         .fill(PlayerStyle.accent.opacity(0.04))
                         .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(PlayerStyle.accent, lineWidth: 2))
-                    VStack(spacing: 12) {
-                        Image(systemName: "arrow.down.doc").font(.system(size: 30, weight: .medium))
-                        Text("松开即可播放").font(.system(size: 22, weight: .semibold))
-                        Text("拖入本地音频，自动加入播放列表").font(.system(size: 13))
+                    VStack(spacing: windowMode.isMini ? 0 : 12) {
+                        if !windowMode.isMini {
+                            Image(systemName: "arrow.down.doc").font(.system(size: 30, weight: .medium))
+                        }
+                        Text("松开即可播放").font(.system(size: windowMode.isMini ? 15 : 22, weight: .semibold))
+                        if !windowMode.isMini {
+                            Text("拖入本地音频，自动加入播放列表").font(.system(size: 13))
+                        }
                     }
                     .foregroundStyle(PlayerStyle.accent)
-                    .padding(28)
+                    .padding(windowMode.isMini ? 12 : 28)
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
                 }
                 .padding(10)
@@ -97,20 +133,53 @@ struct PlayerView: View {
                 keyboard.cancelPress()
             })
         }
-        .onDisappear { fileDrop.cancel() }
+        .onDisappear { fileDrop.cancel(); keyboard.shortcutsSuspended = false }
+        .onAppear { windowMode.updateMiniSupplementHeight(miniSupplementHeight) }
+        .onChange(of: miniSupplementHeight) { windowMode.updateMiniSupplementHeight($0) }
         .onChange(of: settingsShown) { open in
             keyboard.shortcutsSuspended = open
             keyboard.cancelPress()
         }
         .background(WindowAttachment { window in
-            keyboard.install(for: window, controller: controller)
+            if keyboard.window !== window { keyboard.install(for: window, controller: controller) }
+            windowMode.onWillSwitch = {
+                settingsShown = false
+                keyboard.cancelPress()
+                keyboard.shortcutsSuspended = false
+            }
+            windowMode.attach(to: window)
         })
-        .alert("操作未完成", isPresented: Binding(
-            get: { controller.errorMessage != nil },
-            set: { if !$0 { controller.errorMessage = nil } }
+        .alert(controller.errorMessage != nil ? "操作未完成" : "播放提示", isPresented: Binding(
+            get: { controller.errorMessage != nil || feedbackDetail != nil },
+            set: { if !$0 { controller.errorMessage = nil; feedbackDetail = nil } }
         )) {
-            Button("好", role: .cancel) { controller.errorMessage = nil }
-        } message: { Text(controller.errorMessage ?? "") }
+            Button("好", role: .cancel) { controller.errorMessage = nil; feedbackDetail = nil }
+        } message: { Text(controller.errorMessage ?? feedbackDetail ?? "") }
+    }
+
+    private func miniFeedbackBar(_ message: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: fileDrop.isLoading ? "arrow.down.doc" : "info.circle")
+                .accessibilityHidden(true)
+            Text(message).lineLimit(1).truncationMode(.tail).help(message)
+            Spacer(minLength: 0)
+            Button(fileDrop.isLoading ? "取消" : "详情") {
+                if fileDrop.isLoading { fileDrop.cancel() } else { feedbackDetail = message }
+            }.buttonStyle(.borderless)
+            if !fileDrop.isLoading {
+                Button {
+                    if windowMode.notice != nil { windowMode.notice = nil }
+                    else if controller.sessionNotice != nil { controller.sessionNotice = nil }
+                    else { fileDrop.feedback = nil }
+                } label: {
+                    Image(systemName: "xmark").frame(width: 20, height: 20)
+                }
+                .buttonStyle(.borderless).accessibilityLabel("关闭当前提示")
+            }
+        }
+        .font(.system(size: 11)).foregroundStyle(PlayerStyle.muted)
+        .padding(.horizontal, 12).frame(height: 28)
+        .background(Color(nsColor: .controlBackgroundColor))
     }
 
     private func feedbackBanner(_ message: String, closeTitle: String = "关闭", close: @escaping () -> Void) -> some View {

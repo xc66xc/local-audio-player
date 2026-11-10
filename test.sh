@@ -12,6 +12,7 @@ swiftc -parse-as-library -o .build/checks/PlayerChecks \
   Sources/LocalAudioPlayer/SessionStore.swift \
   Sources/LocalAudioPlayer/AudioPlayerController.swift \
   Sources/LocalAudioPlayer/WindowKeyboardHandler.swift \
+  Sources/LocalAudioPlayer/WindowModeCoordinator.swift \
   Tests/LocalAudioPlayerTests/PlayerTests.swift \
   Tests/LocalAudioPlayerTests/CheckRunner.swift
 .build/checks/PlayerChecks
