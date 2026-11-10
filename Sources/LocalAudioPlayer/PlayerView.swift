@@ -145,9 +145,6 @@ struct PlayerView: View {
                 .lineLimit(2).multilineTextAlignment(.center)
                 .help(controller.currentItem?.name ?? "添加本地音频即可开始播放")
                 .padding(.top, 12)
-            Text(controller.currentItem.map { "本地音频 · \($0.url.pathExtension.uppercased())" } ?? "MP3、M4A、FLAC、WAV 等本地音频")
-                .font(.system(size: 14)).foregroundStyle(PlayerStyle.muted)
-                .padding(.top, 10)
             Spacer(minLength: 20)
 
             Slider(value: Binding(get: { controller.position }, set: { controller.seek(to: $0) }),
@@ -249,6 +246,18 @@ struct PlayerView: View {
                         AudioRow(item: item, index: index + 1,
                                  isCurrent: controller.currentID == item.id,
                                  isPlaying: controller.isPlaying,
+                                 resumePosition: controller.pendingResume.flatMap { $0.itemID == item.id ? $0.position : nil },
+                                 acceptResume: {
+                                     guard controller.currentID == item.id, controller.pendingResume?.itemID == item.id else { return }
+                                     keyboard.cancelPress()
+                                     controller.acceptResume()
+                                 },
+                                 dismissResume: {
+                                     guard controller.currentID == item.id, controller.pendingResume?.itemID == item.id else { return }
+                                     keyboard.cancelPress()
+                                     controller.dismissResume()
+                                 },
+                                 play: { controller.playItem(item.id) },
                                  relocate: { controller.chooseReplacement(for: item.id, in: keyboard.window) })
                             .contextMenu {
                                 Button("重命名…") { controller.chooseRename(for: item.id, in: keyboard.window) }
@@ -264,7 +273,6 @@ struct PlayerView: View {
                                     .fill(controller.currentID == item.id ? PlayerStyle.selected : Color.clear)
                                     .padding(.horizontal, 10)
                             )
-                            .onTapGesture(count: 2) { controller.playItem(item.id) }
                     }
                 }
                 .listStyle(.inset)
@@ -295,38 +303,53 @@ private struct AudioRow: View {
     let index: Int
     let isCurrent: Bool
     let isPlaying: Bool
+    let resumePosition: TimeInterval?
+    let acceptResume: () -> Void
+    let dismissResume: () -> Void
+    let play: () -> Void
     let relocate: () -> Void
     @State private var duration: Double?
     @State private var durationUnavailable = false
 
     var body: some View {
-        HStack(spacing: 12) {
-            Group {
-                if isCurrent { Image(systemName: isPlaying ? "waveform" : "pause.fill") }
-                else { Text("\(index)").monospacedDigit() }
-            }
-            .font(.system(size: 12)).frame(width: 18)
-            .foregroundStyle(isCurrent ? PlayerStyle.accent : PlayerStyle.muted)
-            Image(systemName: "music.note").font(.system(size: 20))
-                .foregroundStyle(PlayerStyle.muted)
-                .frame(width: 36, height: 36)
-                .background(Color(nsColor: .quaternaryLabelColor).opacity(0.35), in: RoundedRectangle(cornerRadius: 7))
-            Text(item.name).font(.system(size: 13, weight: isCurrent ? .medium : .regular))
-                .lineLimit(1).truncationMode(.middle)
-                .foregroundStyle(isCurrent ? PlayerStyle.accent : Color.primary)
-            Spacer(minLength: 8)
-            if item.isUnavailable {
-                VStack(alignment: .trailing, spacing: 3) {
-                    Text("文件不可用").font(.system(size: 11)).foregroundStyle(.secondary)
-                    Button("重新定位", action: relocate).buttonStyle(.borderless).font(.system(size: 11))
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                Group {
+                    if isCurrent { Image(systemName: isPlaying ? "waveform" : "pause.fill") }
+                    else { Text("\(index)").monospacedDigit() }
                 }
-            }
-            Text(duration.map { PlaybackRules.timeLabel($0.rounded()) } ?? "—")
-                .font(.system(size: 12, design: .monospaced))
+                .font(.system(size: 12)).frame(width: 18)
                 .foregroundStyle(isCurrent ? PlayerStyle.accent : PlayerStyle.muted)
-                .help(durationUnavailable ? "无法读取时长，播放时将重新检查文件" : "音频时长")
+                Image(systemName: "music.note").font(.system(size: 20))
+                    .foregroundStyle(PlayerStyle.muted)
+                    .frame(width: 36, height: 36)
+                    .background(Color(nsColor: .quaternaryLabelColor).opacity(0.35), in: RoundedRectangle(cornerRadius: 7))
+                Text(item.name).font(.system(size: 13, weight: isCurrent ? .medium : .regular))
+                    .lineLimit(1).truncationMode(.middle)
+                    .foregroundStyle(isCurrent ? PlayerStyle.accent : Color.primary)
+                Spacer(minLength: 8)
+                if item.isUnavailable {
+                    VStack(alignment: .trailing, spacing: 3) {
+                        Text("文件不可用").font(.system(size: 11)).foregroundStyle(.secondary)
+                        Button("重新定位", action: relocate).buttonStyle(.borderless).font(.system(size: 11))
+                    }
+                }
+                Text(duration.map { PlaybackRules.timeLabel($0.rounded()) } ?? "—")
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(isCurrent ? PlayerStyle.accent : PlayerStyle.muted)
+                    .fixedSize()
+                    .help(durationUnavailable ? "无法读取时长，播放时将重新检查文件" : "音频时长")
+            }
+            .contentShape(Rectangle())
+            // Keep the double-click gesture off the reminder's buttons.
+            .onTapGesture(count: 2, perform: play)
+
+            if isCurrent, !item.isUnavailable, let resumePosition {
+                resumeReminder(at: resumePosition)
+                    .padding(.leading, 78)
+            }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, isCurrent && resumePosition != nil ? 8 : 4)
         .contentShape(Rectangle())
         .help(item.url.path)
         .task(id: item) {
@@ -346,6 +369,42 @@ private struct AudioRow: View {
             } catch {
                 if !Task.isCancelled { durationUnavailable = true }
             }
+        }
+    }
+
+    private func resumeReminder(at position: TimeInterval) -> some View {
+        let time = PlaybackRules.timeLabel(position)
+        return HStack(spacing: 8) {
+            Label {
+                Text("上次听到 \(time)").monospacedDigit()
+            } icon: {
+                Image(systemName: "clock").accessibilityHidden(true)
+            }
+            .font(.system(size: 11))
+            .foregroundStyle(PlayerStyle.muted)
+            .fixedSize()
+            Button(action: acceptResume) {
+                Text("点击跳转")
+                    .font(.system(size: 11, weight: .medium))
+                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(PlayerStyle.accent, lineWidth: 0.8))
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(PlayerStyle.accent)
+            .fixedSize()
+            .accessibilityLabel("跳转到上次收听位置，\(time)")
+            .help("跳转到 \(time)，保持当前播放或暂停状态")
+            Spacer(minLength: 0)
+            Button(action: dismissResume) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .medium))
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(PlayerStyle.muted)
+            .accessibilityLabel("忽略上次收听位置")
+            .help("忽略上次位置，记录这次的收听进度")
         }
     }
 }

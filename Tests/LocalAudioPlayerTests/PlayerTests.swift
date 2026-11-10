@@ -1,5 +1,7 @@
 import AVFAudio
 import AppKit
+import CryptoKit
+import Darwin
 import UniformTypeIdentifiers
 
 // A provider that only delivers after the test has performed the competing user action.
@@ -572,13 +574,20 @@ final class PlayerTests: CheckSuite {
         controller.seek(to: 2)
         expectTrue(try await waitForSession { FileManager.default.fileExists(atPath: store.checkpointURL.path) })
         controller.seek(to: 7)
-        controller.shutdown()
+        // Test crash-recovery transport backup before normal-exit resume archival updates the library digest.
+        expectTrue(try await waitForSession {
+            guard let data = try? Data(contentsOf: store.checkpointURL),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let state = json["state"] as? [String: Any] else { return false }
+            return state["position"] as? Double == 7
+        })
         try Data("corrupt".utf8).write(to: store.checkpointURL)
         let backup = AudioPlayerController(sessionStore: SessionStore(fileURL: store.fileURL))
         await backup.restoreSession()
         expectNotNil(backup.sessionNotice)
         expectEqual(backup.position, 2, accuracy: 0.05)
         backup.shutdown()
+        controller.shutdown()
         var object = try JSONSerialization.jsonObject(with: Data(contentsOf: store.fileURL)) as! [String: Any]
         object["forwardSeconds"] = 9999
         try JSONSerialization.data(withJSONObject: object).write(to: store.fileURL)
@@ -662,14 +671,19 @@ final class PlayerTests: CheckSuite {
         for count in [100, 1000] {
             let store = try sessionStore()
             let entries = (0..<count).map { _ in PlaylistItem(url: url) }
+            let history = Dictionary(uniqueKeysWithValues: entries.map {
+                ($0.id, ResumePosition(position: 7, duration: 100))
+            })
             let state = SavedSession(items: entries, position: 0, duration: 0, autoAdvance: false,
-                                     forwardSeconds: 5, backwardSeconds: 5, holdRate: 2)
+                                     forwardSeconds: 5, backwardSeconds: 5, holdRate: 2,
+                                     resumePositions: history)
             let start = Date()
             expectNil(store.flush(state))
             let written = Date()
             let result = await store.load()
             let end = Date()
             expectEqual(result.session?.items.count, count)
+            expectEqual(result.session?.resumePositions.count, count)
             let libraryBytes = try Data(contentsOf: store.fileURL)
             var progress = state
             progress.duration = 100
@@ -679,11 +693,373 @@ final class PlayerTests: CheckSuite {
             }
             expectEqual(try Data(contentsOf: store.fileURL), libraryBytes)
             expectLessThan(try Data(contentsOf: store.checkpointURL).count, 2048)
+            let checkpoint = try JSONSerialization.jsonObject(with: Data(contentsOf: store.checkpointURL)) as! [String: Any]
+            let transport = checkpoint["state"] as! [String: Any]
+            expectNil(transport["resumePositions"])
             let latest = await SessionStore(fileURL: store.fileURL).load()
             expectEqual(latest.session?.position, 12)
             print("  CHECKPOINT bytes=\(try Data(contentsOf: store.checkpointURL).count), library unchanged after 12 updates")
-            print("  SESSION \(count) entries: write=\(written.timeIntervalSince(start))s restore=\(end.timeIntervalSince(written))s bytes=\(try Data(contentsOf: store.fileURL).count)")
+            print("  SESSION \(count) entries with resume history: write=\(written.timeIntervalSince(start))s restore=\(end.timeIntervalSince(written))s bytes=\(try Data(contentsOf: store.fileURL).count)")
         }
+    }
+
+    @MainActor func testPerTrackResumeSwitchAndAccept() async throws {
+        for (name, codec) in [("01.m4a", "aac"), ("01.opus", "libopus")] {
+            let controller = AudioPlayerController()
+            defer { controller.shutdown() }
+            controller.addFiles([try encodedFixture(name, codec: codec, seconds: 15), try fixture("02.m4a")])
+            let a = controller.items[0].id
+            let b = controller.items[1].id
+            expectTrue(controller.load(a, autoplay: false))
+            controller.seek(to: 7)
+            expectTrue(controller.load(b, autoplay: false))
+            controller.seek(to: 6)
+            expectTrue(controller.load(a, autoplay: false))
+            expectEqual(controller.pendingResume?.itemID, a)
+            expectEqual(controller.pendingResume?.position, 7)
+            expectEqual(controller.position, 0)
+            controller.acceptResume()
+            expectEqual(controller.position, 7, accuracy: 0.05)
+            expectFalse(controller.isPlaying)
+            expectNil(controller.pendingResume)
+            expectTrue(controller.load(b, autoplay: true))
+            expectEqual(controller.pendingResume?.itemID, b)
+            expectEqual(controller.pendingResume?.position, 6)
+            controller.acceptResume()
+            expectTrue(controller.isPlaying)
+            expectEqual(controller.position, 6, accuracy: 0.15)
+            expectNil(controller.pendingResume)
+        }
+    }
+
+    @MainActor func testPerTrackResumePendingSurvivesSwitchAndRestart() async throws {
+        let store = try sessionStore()
+        let original = AudioPlayerController(sessionStore: store)
+        await original.restoreSession()
+        original.addFiles([try fixture("01.m4a"), try fixture("02.m4a")])
+        let a = original.items[0].id
+        let b = original.items[1].id
+        original.load(a, autoplay: false)
+        original.seek(to: 7)
+        original.load(b, autoplay: false)
+        original.load(a, autoplay: true)
+        try await Task.sleep(nanoseconds: 400_000_000)
+        original.togglePlayback()
+        expectEqual(original.pendingResume?.position, 7)
+        original.load(b, autoplay: false)
+        original.load(a, autoplay: true)
+        try await Task.sleep(nanoseconds: 400_000_000)
+        original.togglePlayback()
+        let actualPosition = original.position
+        expectGreaterThan(actualPosition, 0.1)
+        expectLessThan(actualPosition, 2)
+        expectEqual(original.pendingResume?.position, 7)
+        original.shutdown()
+
+        let restored = AudioPlayerController(sessionStore: SessionStore(fileURL: store.fileURL))
+        await restored.restoreSession()
+        defer { restored.shutdown() }
+        expectEqual(restored.currentID, a)
+        expectFalse(restored.isPlaying)
+        expectEqual(restored.position, actualPosition, accuracy: 0.15)
+        expectEqual(restored.pendingResume?.itemID, a)
+        expectEqual(restored.pendingResume?.position, 7)
+        restored.acceptResume()
+        expectEqual(restored.position, 7, accuracy: 0.05)
+        expectFalse(restored.isPlaying)
+        expectNil(restored.pendingResume)
+    }
+
+    @MainActor func testPerTrackResumeDismissAndManualSeek() async throws {
+        let controller = AudioPlayerController()
+        defer { controller.shutdown() }
+        controller.addFiles([try fixture("01.m4a"), try fixture("02.m4a")])
+        let a = controller.items[0].id
+        let b = controller.items[1].id
+        controller.load(a, autoplay: false)
+        controller.seek(to: 7)
+        controller.load(b, autoplay: false)
+        controller.load(a, autoplay: false)
+        expectEqual(controller.pendingResume?.position, 7)
+        controller.dismissResume()
+        expectNil(controller.pendingResume)
+        expectEqual(controller.position, 0)
+        controller.load(b, autoplay: false)
+        controller.load(a, autoplay: false)
+        expectNil(controller.pendingResume)
+
+        controller.seek(to: 7)
+        controller.load(b, autoplay: false)
+        controller.load(a, autoplay: false)
+        controller.seek(to: 6)
+        expectNil(controller.pendingResume)
+        controller.load(b, autoplay: false)
+        controller.load(a, autoplay: false)
+        expectEqual(controller.pendingResume?.position, 6)
+        // Short arrow-key jumps use this same controller entry point.
+        controller.seek(by: 1)
+        expectNil(controller.pendingResume)
+        expectEqual(controller.position, 1, accuracy: 0.05)
+    }
+
+    @MainActor func testPerTrackResumePeriodicCheckpointProtectsOffer() async throws {
+        let store = try sessionStore()
+        let original = AudioPlayerController(sessionStore: store)
+        await original.restoreSession()
+        defer { original.shutdown() }
+        original.addFiles([try fixture("01.m4a", seconds: 30), try fixture("02.m4a")])
+        let a = original.items[0].id
+        original.load(a, autoplay: false)
+        original.seek(to: 20)
+        original.load(original.items[1].id, autoplay: false)
+        original.load(a, autoplay: true)
+        expectTrue(try await waitForSession { FileManager.default.fileExists(atPath: store.checkpointURL.path) })
+        let library = try Data(contentsOf: store.fileURL)
+        expectTrue(try await waitForSession(timeout: 8) {
+            guard let data = try? Data(contentsOf: store.checkpointURL),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let state = json["state"] as? [String: Any], let time = state["position"] as? Double
+            else { return false }
+            return time > 4.5
+        })
+        expectEqual(try Data(contentsOf: store.fileURL), library)
+        expectEqual(original.pendingResume?.position, 20)
+        // Read before a final flush: both positions must survive only the periodic checkpoint.
+        let recovered = AudioPlayerController(sessionStore: SessionStore(fileURL: store.fileURL))
+        await recovered.restoreSession()
+        defer { recovered.shutdown() }
+        expectFalse(recovered.isPlaying)
+        expectGreaterThan(recovered.position, 4.5)
+        expectLessThan(recovered.position, 10)
+        expectEqual(recovered.pendingResume?.itemID, a)
+        expectEqual(recovered.pendingResume?.position, 20)
+    }
+
+    @MainActor func testPerTrackResumeFailureRenameAndRemoval() async throws {
+        let store = try sessionStore()
+        let source = try fixture("01.m4a")
+        let bad = source.deletingLastPathComponent().appendingPathComponent("03.m4a")
+        try Data("broken audio".utf8).write(to: bad)
+        let controller = AudioPlayerController(sessionStore: store)
+        await controller.restoreSession()
+        controller.addFiles([source, try fixture("02.m4a"), bad])
+        let a = controller.items[0].id
+        let b = controller.items[1].id
+        controller.load(a, autoplay: false)
+        controller.seek(to: 7)
+        controller.load(b, autoplay: false)
+        controller.load(a, autoplay: true)
+        expectFalse(controller.load(controller.items[2].id, autoplay: true))
+        expectEqual(controller.currentID, a)
+        expectTrue(controller.isPlaying)
+        expectEqual(controller.pendingResume?.position, 7)
+        expectTrue(controller.renameFile(a, to: "改名后仍可续听"))
+        expectEqual(controller.currentID, a)
+        expectTrue(controller.isPlaying)
+        expectEqual(controller.pendingResume?.position, 7)
+        controller.load(b, autoplay: false)
+        controller.load(a, autoplay: false)
+        expectEqual(controller.pendingResume?.position, 7)
+        let renamed = controller.currentItem!.url
+        controller.selectedID = a
+        controller.removeSelected()
+        expectNil(controller.pendingResume)
+        controller.addFiles([renamed])
+        let replacement = controller.items.first { $0.url == renamed }!.id
+        expectTrue(replacement != a)
+        controller.load(replacement, autoplay: false)
+        expectNil(controller.pendingResume)
+        controller.shutdown()
+        let saved = await SessionStore(fileURL: store.fileURL).load()
+        expectNil(saved.session?.resumePositions[a])
+        expectTrue(FileManager.default.fileExists(atPath: renamed.path))
+    }
+
+    @MainActor func testPerTrackResumeNaturalCatchUpAndCompletion() async throws {
+        let controller = AudioPlayerController()
+        defer { controller.shutdown() }
+        controller.addFiles([try fixture("01.m4a"), try fixture("02.m4a")])
+        let a = controller.items[0].id
+        let b = controller.items[1].id
+        controller.load(a, autoplay: false)
+        controller.seek(to: 5)
+        controller.load(b, autoplay: false)
+        controller.load(a, autoplay: true)
+        expectEqual(controller.pendingResume?.position, 5)
+        controller.holdRate = 2
+        controller.beginBoost()
+        expectTrue(try await waitForSession(timeout: 5) {
+            controller.position >= 5 && controller.pendingResume == nil
+        })
+        controller.togglePlayback()
+        let caughtUp = controller.position
+        controller.load(b, autoplay: false)
+        controller.load(a, autoplay: false)
+        expectNotNil(controller.pendingResume)
+        expectEqual(controller.pendingResume?.position ?? 0, caughtUp, accuracy: 0.15)
+        controller.acceptResume()
+        controller.seek(to: controller.duration - 0.15)
+        controller.togglePlayback()
+        expectTrue(try await waitForSession { !controller.isPlaying })
+        expectEqual(controller.position, controller.duration)
+        controller.load(b, autoplay: false)
+        controller.load(a, autoplay: false)
+        expectNil(controller.pendingResume)
+        expectEqual(controller.position, 0)
+    }
+
+    @MainActor func testPerTrackResumeDecoderFailureCanReplayActualPosition() async throws {
+        let source = try encodedFixture("01.opus", codec: "libopus", seconds: 30)
+        let controller = AudioPlayerController()
+        defer { controller.shutdown() }
+        controller.addFiles([source, try fixture("02.m4a")])
+        let a = controller.items[0].id
+        controller.load(a, autoplay: false)
+        controller.seek(to: 12)
+        controller.load(controller.items[1].id, autoplay: false)
+        controller.load(a, autoplay: true)
+        controller.holdRate = 2
+        controller.beginBoost()
+        expectTrue(try await waitForSession(timeout: 6) { controller.position >= 5 })
+        controller.endBoost()
+        expectEqual(controller.pendingResume?.position, 12)
+
+        // Only terminate this test's direct child decoder for its unique temporary fixture.
+        // A bounded decode pipe keeps the 30-second child alive; no production test hook is needed.
+        let lookup = Process()
+        let identifiers = Pipe()
+        lookup.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        lookup.arguments = ["-P", String(getpid()), "-f", NSRegularExpression.escapedPattern(for: source.path)]
+        lookup.standardOutput = identifiers
+        try lookup.run()
+        let data = identifiers.fileHandleForReading.readDataToEndOfFile()
+        lookup.waitUntilExit()
+        let pids = String(decoding: data, as: UTF8.self).split(whereSeparator: \.isWhitespace).compactMap { Int32($0) }
+        guard lookup.terminationStatus == 0, pids.count == 1, let pid = pids.first else {
+            throw NSError(domain: "FixtureDecoderLookup", code: Int(lookup.terminationStatus))
+        }
+        let inspect = Process()
+        let command = Pipe()
+        inspect.executableURL = URL(fileURLWithPath: "/bin/ps")
+        inspect.arguments = ["-p", String(pid), "-o", "comm="]
+        inspect.standardOutput = command
+        try inspect.run()
+        let executable = String(decoding: command.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        inspect.waitUntilExit()
+        guard inspect.terminationStatus == 0, URL(fileURLWithPath: executable).lastPathComponent == "ffmpeg" else {
+            throw NSError(domain: "FixtureDecoderIdentity", code: 1)
+        }
+        guard kill(pid, SIGKILL) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+
+        expectTrue(try await waitForSession(timeout: 5) { !controller.isPlaying && controller.errorMessage != nil })
+        let interruptedPosition = controller.position
+        expectGreaterThan(interruptedPosition, 4.9)
+        expectLessThan(interruptedPosition, 12)
+        expectEqual(controller.currentID, a)
+        expectEqual(controller.pendingResume?.position, 12)
+        controller.errorMessage = nil
+        controller.togglePlayback()
+        expectTrue(controller.isPlaying)
+        try await Task.sleep(nanoseconds: 650_000_000)
+        expectGreaterThan(controller.position, interruptedPosition + 0.15)
+        expectLessThan(controller.position, 12)
+        expectEqual(controller.pendingResume?.position, 12)
+        expectNil(controller.errorMessage)
+    }
+
+    @MainActor func testPerTrackResumeChangedFileAndRelocation() async throws {
+        let source = try fixture("01.m4a")
+        let controller = AudioPlayerController()
+        defer { controller.shutdown() }
+        controller.addFiles([source, try fixture("02.m4a")])
+        let a = controller.items[0].id
+        let b = controller.items[1].id
+        controller.load(a, autoplay: false)
+        controller.seek(to: 7)
+        controller.load(b, autoplay: false)
+        let shorter = try fixture("short.m4a", seconds: 4)
+        try FileManager.default.removeItem(at: source)
+        try FileManager.default.copyItem(at: shorter, to: source)
+        controller.load(a, autoplay: false)
+        expectNil(controller.pendingResume)
+        expectLessThan(controller.duration, 5)
+        let relocated = try fixture("different.m4a")
+        controller.relocate(a, to: relocated)
+        controller.seek(to: 7)
+        controller.load(b, autoplay: false)
+        controller.relocate(a, to: try fixture("another.m4a", seconds: 10))
+        controller.load(a, autoplay: false)
+        expectNil(controller.pendingResume)
+        expectEqual(controller.items[0].id, a)
+    }
+
+    @MainActor func testResumeSchemaOneMigrationAndMixedSnapshots() async throws {
+        let store = try sessionStore()
+        let entries = [PlaylistItem(url: try fixture("01.m4a")), PlaylistItem(url: try fixture("02.m4a"))]
+        let current = entries[0].id
+        let initial = SavedSession(items: entries, selectedID: current, currentID: current,
+                                   position: 2, duration: 12, autoAdvance: false,
+                                   forwardSeconds: 5, backwardSeconds: 5, holdRate: 2)
+        var legacyLibrary = try JSONSerialization.jsonObject(with: JSONEncoder().encode(initial)) as! [String: Any]
+        legacyLibrary["schemaVersion"] = 1
+        legacyLibrary.removeValue(forKey: "resumePositions")
+        legacyLibrary.removeValue(forKey: "pendingResume")
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyLibrary, options: [.sortedKeys])
+        try legacyData.write(to: store.fileURL)
+        var legacyState = legacyLibrary
+        legacyState["items"] = []
+        legacyState["position"] = 7
+        let digest = SHA256.hash(data: legacyData).map { String(format: "%02x", $0) }.joined()
+        var legacyTransport: [String: Any] = ["schemaVersion": 1, "libraryDigest": digest, "state": legacyState]
+        try JSONSerialization.data(withJSONObject: legacyTransport).write(to: store.checkpointURL)
+
+        let restored = AudioPlayerController(sessionStore: store)
+        await restored.restoreSession()
+        expectEqual(restored.currentID, current)
+        expectEqual(restored.position, 7, accuracy: 0.05)
+        expectFalse(restored.isPlaying)
+        expectNil(restored.pendingResume)
+        restored.shutdown()
+        let written = try JSONSerialization.jsonObject(with: Data(contentsOf: store.fileURL)) as! [String: Any]
+        expectEqual(written["schemaVersion"] as? Int, 2)
+        let migrated = await SessionStore(fileURL: store.fileURL).load()
+        expectEqual(migrated.session?.resumePositions[current]?.position, 7)
+        expectEqual(migrated.session?.resumePositions.count, 1)
+
+        // A stale v1 transport cannot be applied to a different v2 library digest.
+        legacyState["position"] = 9
+        legacyTransport["state"] = legacyState
+        let staleTransport = try JSONSerialization.data(withJSONObject: legacyTransport)
+        try staleTransport.write(to: store.checkpointURL)
+        try staleTransport.write(to: store.checkpointBackupURL)
+        try legacyData.write(to: store.backupURL)
+        let mixed = AudioPlayerController(sessionStore: SessionStore(fileURL: store.fileURL))
+        await mixed.restoreSession()
+        expectEqual(mixed.position, 7, accuracy: 0.05)
+        expectFalse(mixed.isPlaying)
+        mixed.load(entries[1].id, autoplay: false)
+        mixed.load(current, autoplay: false)
+        expectEqual(mixed.pendingResume?.position, 7)
+        mixed.shutdown()
+    }
+
+    @MainActor func testResumeInvalidEntriesDoNotDiscardLibrary() async throws {
+        let store = try sessionStore()
+        let url = try fixture()
+        let entries = (0..<3).map { _ in PlaylistItem(url: url) }
+        let history = [entries[0].id: ResumePosition(position: 7, duration: 12),
+                       entries[1].id: ResumePosition(position: -1, duration: 12),
+                       entries[2].id: ResumePosition(position: 20, duration: 12),
+                       UUID(): ResumePosition(position: 7, duration: 12)]
+        let state = SavedSession(items: entries, position: 0, duration: 0, autoAdvance: false,
+                                 forwardSeconds: 5, backwardSeconds: 5, holdRate: 2,
+                                 resumePositions: history)
+        expectNil(store.flush(state))
+        let restored = await SessionStore(fileURL: store.fileURL).load()
+        expectEqual(restored.session?.items.count, 3)
+        expectEqual(restored.session?.resumePositions.count, 1)
+        expectEqual(restored.session?.resumePositions[entries[0].id]?.position, 7)
     }
 
     @MainActor func testSessionInterruptedLibraryUpdateAndEarlyExit() async throws {
