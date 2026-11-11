@@ -46,6 +46,14 @@ struct CheckRunner {
     @MainActor static func main() async {
         let suite = PlayerTests()
         let tests: [(String, @MainActor () async throws -> Void)] = [
+            ("NCM 0/1 标记的 MP3/FLAC 按字节还原、警告及临时租约清理", suite.testNcmPreparationBytesWarningsAndLeaseCleanup),
+            ("NCM CRC 损坏、截断及无效音频拒绝且保留原文件", suite.testNcmRejectsCorruptTruncatedAndInvalidAudio),
+            ("NCM 实际播放、跳转、长按倍速与自然结束连播", suite.testNcmPlaybackSeekHoldAndNaturalCompletion),
+            ("NCM 拖入、待选续听、暂停恢复及原容器重命名", suite.testNcmDropPendingResumeRestoreAndRenameOriginal),
+            ("NCM 准备跨小窗切换并在重新定位后保留暂停位置", suite.testNcmMiniSwitchKeepsPreparationAndRelocationPosition),
+            ("迟到 NCM 准备不能覆盖暂停、跳转与较新列表操作", suite.testNcmSlowPreparationCannotOverrideNewerUserActions),
+            ("NCM 准备失败保留旧播放及待选续听", suite.testNcmFailedPreparationKeepsOldPlaybackAndResumeOffer),
+            ("NCM 超时及退出终止辅助进程并清理私有临时目录", suite.testNcmTimeoutAndShutdownReapHelperAndCleanScratch),
             ("小窗尺寸往返、图钉层级与独立偏好恢复", suite.testMiniWindowFramesPinAndPreferences),
             ("小窗切换保留原生/Opus播放和续听、取消长按不快进", suite.testMiniWindowKeepsAudioAndCancelsHold),
             ("切换小窗期间仍完成已接收的异步拖入", suite.testMiniWindowSwitchPreservesPendingDrop),

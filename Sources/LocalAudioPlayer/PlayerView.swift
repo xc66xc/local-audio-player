@@ -40,7 +40,15 @@ struct PlayerView: View {
 
     private var miniStatusMessage: String? {
         if fileDrop.isLoading { return "正在添加音频…" }
+        if controller.isPreparingAudio { return "正在打开音频…" }
         return windowMode.notice ?? controller.sessionNotice ?? fileDrop.feedback
+    }
+
+    private var isOpeningAudio: Bool { fileDrop.isLoading || controller.isPreparingAudio }
+
+    private func cancelOpeningAudio() {
+        fileDrop.cancel()
+        controller.cancelAudioPreparation()
     }
 
     private var miniSupplementHeight: CGFloat {
@@ -79,8 +87,10 @@ struct PlayerView: View {
                     if let notice = controller.sessionNotice {
                         feedbackBanner(notice) { controller.sessionNotice = nil }
                     }
-                    if fileDrop.isLoading {
-                        feedbackBanner("正在添加音频…", closeTitle: "取消") { fileDrop.cancel() }
+                    if isOpeningAudio {
+                        feedbackBanner(fileDrop.isLoading ? "正在添加音频…" : "正在打开音频…", closeTitle: "取消") {
+                            cancelOpeningAudio()
+                        }
                     } else if let feedback = fileDrop.feedback {
                         feedbackBanner(feedback) { fileDrop.feedback = nil }
                     }
@@ -159,14 +169,14 @@ struct PlayerView: View {
 
     private func miniFeedbackBar(_ message: String) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: fileDrop.isLoading ? "arrow.down.doc" : "info.circle")
+            Image(systemName: isOpeningAudio ? "arrow.down.doc" : "info.circle")
                 .accessibilityHidden(true)
             Text(message).lineLimit(1).truncationMode(.tail).help(message)
             Spacer(minLength: 0)
-            Button(fileDrop.isLoading ? "取消" : "详情") {
-                if fileDrop.isLoading { fileDrop.cancel() } else { feedbackDetail = message }
+            Button(isOpeningAudio ? "取消" : "详情") {
+                if isOpeningAudio { cancelOpeningAudio() } else { feedbackDetail = message }
             }.buttonStyle(.borderless)
-            if !fileDrop.isLoading {
+            if !isOpeningAudio {
                 Button {
                     if windowMode.notice != nil { windowMode.notice = nil }
                     else if controller.sessionNotice != nil { controller.sessionNotice = nil }
@@ -315,6 +325,7 @@ struct PlayerView: View {
                         AudioRow(item: item, index: index + 1,
                                  isCurrent: controller.currentID == item.id,
                                  isPlaying: controller.isPlaying,
+                                 currentDuration: controller.currentID == item.id && controller.duration > 0 ? controller.duration : nil,
                                  resumePosition: controller.pendingResume.flatMap { $0.itemID == item.id ? $0.position : nil },
                                  acceptResume: {
                                      guard controller.currentID == item.id, controller.pendingResume?.itemID == item.id else { return }
@@ -372,6 +383,7 @@ private struct AudioRow: View {
     let index: Int
     let isCurrent: Bool
     let isPlaying: Bool
+    let currentDuration: TimeInterval?
     let resumePosition: TimeInterval?
     let acceptResume: () -> Void
     let dismissResume: () -> Void
@@ -403,11 +415,12 @@ private struct AudioRow: View {
                         Button("重新定位", action: relocate).buttonStyle(.borderless).font(.system(size: 11))
                     }
                 }
-                Text(duration.map { PlaybackRules.timeLabel($0.rounded()) } ?? "—")
+                Text((currentDuration ?? duration).map { PlaybackRules.timeLabel($0.rounded()) } ?? "—")
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(isCurrent ? PlayerStyle.accent : PlayerStyle.muted)
                     .fixedSize()
-                    .help(durationUnavailable ? "无法读取时长，播放时将重新检查文件" : "音频时长")
+                    .help(durationUnavailable ? "无法读取时长，播放时将重新检查文件" :
+                          AudioFileTypes.isNcm(item.url) && duration == nil && currentDuration == nil ? "首次打开后显示时长" : "音频时长")
             }
             .contentShape(Rectangle())
             // Keep the double-click gesture off the reminder's buttons.
@@ -425,6 +438,10 @@ private struct AudioRow: View {
             duration = nil
             durationUnavailable = false
             guard !item.isUnavailable else { durationUnavailable = true; return }
+            if AudioFileTypes.isNcm(item.url) {
+                duration = currentDuration
+                return
+            }
             do {
                 let value: Double
                 if AudioFileTypes.isOgg(item.url) {
@@ -438,6 +455,9 @@ private struct AudioRow: View {
             } catch {
                 if !Task.isCancelled { durationUnavailable = true }
             }
+        }
+        .onChange(of: currentDuration) { value in
+            if let value, value > 0 { duration = value }
         }
     }
 

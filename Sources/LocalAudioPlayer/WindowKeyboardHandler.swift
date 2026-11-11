@@ -22,6 +22,8 @@ final class WindowKeyboardHandler {
     }
 
     func pressRight(controller: AudioPlayerController) {
+        guard !controller.isRestoring else { return }
+        controller.cancelAudioPreparation()
         controller.fileDrop.cancel()
         guard !rightDown else { return }
         self.controller = controller
@@ -74,7 +76,8 @@ final class WindowKeyboardHandler {
                 self.releaseRight()
                 return nil
             }
-            guard !self.shortcutsSuspended, let window = self.window, window.isKeyWindow, event.window === window,
+            guard !self.shortcutsSuspended, !controller.isRestoring,
+                  let window = self.window, window.isKeyWindow, event.window === window,
                   window.attachedSheet == nil, NSApp.modalWindow == nil,
                   !controller.isChoosingFiles, controller.errorMessage == nil else {
                 self.cancelPress()

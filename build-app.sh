@@ -12,14 +12,18 @@ if ! [[ "$APP_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
 fi
 bash build-decoder.sh
 swift build -c release
+[[ "$(.build/release/ncm-restore --version)" == 'ncm-restore 1.0.0' ]]
 APP_DIR="$PWD/dist/Sona.app"
 mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
 mkdir -p "$APP_DIR/Contents/Helpers"
 cp .build/decoder/bin/ffmpeg .build/decoder/bin/ffprobe "$APP_DIR/Contents/Helpers/"
+cp .build/release/ncm-restore "$APP_DIR/Contents/Helpers/ncm-restore"
 cp .build/decoder/FFmpeg-LICENSE.txt "$APP_DIR/Contents/Resources/"
 codesign --force --sign - "$APP_DIR/Contents/Helpers/ffmpeg"
 codesign --force --sign - "$APP_DIR/Contents/Helpers/ffprobe"
+codesign --force --sign - "$APP_DIR/Contents/Helpers/ncm-restore"
+codesign --verify --strict "$APP_DIR/Contents/Helpers/ncm-restore"
 ICONSET="$PWD/.build/AppIcon.iconset"
 mkdir -p "$ICONSET"
 for ICON_SIZE in 16 32 128 256 512; do
@@ -46,6 +50,13 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSPrincipalClass</key><string>NSApplication</string>
+<key>UTImportedTypeDeclarations</key><array><dict>
+<key>UTTypeIdentifier</key><string>local.miniaudio.player.ncm</string>
+<key>UTTypeDescription</key><string>NCM 音频</string>
+<key>UTTypeConformsTo</key><array><string>public.audio</string></array>
+<key>UTTypeTagSpecification</key><dict>
+<key>public.filename-extension</key><array><string>ncm</string></array>
+</dict></dict></array>
 </dict></plist>
 PLIST
 codesign --force --sign - "$APP_DIR"
@@ -75,8 +86,11 @@ if [[ "${1:-}" == '--package' ]]; then
   test -s "$EXTRACTED_APP/Contents/Resources/FFmpeg-LICENSE.txt"
   test -x "$EXTRACTED_APP/Contents/Helpers/ffmpeg"
   test -x "$EXTRACTED_APP/Contents/Helpers/ffprobe"
+  test -x "$EXTRACTED_APP/Contents/Helpers/ncm-restore"
   "$EXTRACTED_APP/Contents/Helpers/ffmpeg" -version >/dev/null
   "$EXTRACTED_APP/Contents/Helpers/ffprobe" -version >/dev/null
+  [[ "$("$EXTRACTED_APP/Contents/Helpers/ncm-restore" --version)" == 'ncm-restore 1.0.0' ]]
+  codesign --verify --strict "$EXTRACTED_APP/Contents/Helpers/ncm-restore"
   [[ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$EXTRACTED_APP/Contents/Info.plist")" == "$APP_VERSION" ]]
   [[ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$EXTRACTED_APP/Contents/Info.plist")" == "$APP_VERSION" ]]
   [[ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleName' "$EXTRACTED_APP/Contents/Info.plist")" == Sona ]]

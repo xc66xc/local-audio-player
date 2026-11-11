@@ -16,10 +16,17 @@ protocol AudioPlayback: AnyObject {
 extension AVAudioPlayer: AudioPlayback {}
 
 enum AudioFileTypes {
-    static let extensions = ["mp3", "m4a", "aac", "adts", "wav", "flac", "aif", "aiff", "aifc", "ogg", "oga", "opus", "m4b", "caf"]
+    static let extensions = ["mp3", "m4a", "aac", "adts", "wav", "flac", "aif", "aiff", "aifc", "ogg", "oga", "opus", "m4b", "caf", "ncm"]
     static var contentTypes: [UTType] {
-        extensions.compactMap { UTType(tag: $0, tagClass: .filenameExtension, conformingTo: .audio) }
+        extensions.compactMap {
+            if $0 == "ncm" {
+                return UTType(filenameExtension: "ncm") ?? UTType(importedAs: "local.miniaudio.player.ncm", conformingTo: .audio)
+            }
+            return UTType(tag: $0, tagClass: .filenameExtension, conformingTo: .audio)
+        }
     }
+
+    static func isNcm(_ url: URL) -> Bool { url.pathExtension.lowercased() == "ncm" }
 
     static func isOgg(_ url: URL) -> Bool {
         guard let file = try? FileHandle(forReadingFrom: url) else { return false }
@@ -38,7 +45,7 @@ enum DecoderTools {
         if Bundle.main.bundleURL.pathExtension != "app" {
             let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
                 .deletingLastPathComponent().deletingLastPathComponent()
-            let local = root.appendingPathComponent(".build/decoder/bin/\(name)")
+            let local = root.appendingPathComponent(name == "ncm-restore" ? ".build/release/ncm-restore" : ".build/decoder/bin/\(name)")
             if FileManager.default.isExecutableFile(atPath: local.path) { return local }
         }
         throw Failure.missingTool

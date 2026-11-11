@@ -17,6 +17,8 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     @Published private(set) var isRestoring = false
     @Published private(set) var isChoosingFiles = false
     @Published private(set) var pendingResume: PendingResume?
+    @Published private(set) var preparingItemID: UUID?
+    var isPreparingAudio: Bool { preparingItemID != nil }
 
     @Published var forwardSeconds = 5 { didSet { if !(1...600).contains(forwardSeconds) { forwardSeconds = min(max(forwardSeconds, 1), 600) }; scheduleSave() } }
     @Published var backwardSeconds = 5 { didSet { if !(1...600).contains(backwardSeconds) { backwardSeconds = min(max(backwardSeconds, 1), 600) }; scheduleSave() } }
@@ -38,6 +40,11 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     let fileDrop = FileDropImporter()
 
     private var player: (any AudioPlayback)?
+    private var preparedAudio: NcmPreparedAudio?
+    private let ncmPreparer: NcmPreparer
+    private var ncmLoadTask: Task<Void, Never>?
+    private var ncmLoadToken: UUID?
+    private var ncmLoadCompletion: ((Bool) -> Void)?
     private var resumePositions: [UUID: ResumePosition] = [:]
     private var currentFileStamp: FileStamp?
     private var ticker: Timer?
@@ -108,6 +115,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     func acceptResume() {
         guard let offer = pendingResume, offer.itemID == currentID,
               offer.position >= 5, offer.position < duration else { return }
+        cancelAudioPreparation()
         if movePlayhead(to: offer.position, adoptingPosition: false) {
             pendingResume = nil
             scheduleSave()
@@ -117,14 +125,16 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
 
     func dismissResume() {
         guard let offer = pendingResume, offer.itemID == currentID else { return }
+        cancelAudioPreparation()
         fileDrop.cancel()
         pendingResume = nil
         scheduleSave()
         logger.info("[resume.dismiss] item=\(offer.itemID.uuidString, privacy: .public)")
     }
 
-    init(sessionStore: SessionStore? = nil) {
+    init(sessionStore: SessionStore? = nil, ncmPreparer: NcmPreparer = NcmPreparer()) {
         self.sessionStore = sessionStore
+        self.ncmPreparer = ncmPreparer
         isRestoring = sessionStore != nil
         super.init()
     }
@@ -151,9 +161,11 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         duration = saved.duration
         // Missing files retain their saved place. Never resume or auto-advance during restoration.
         if let id = saved.currentID, let item = currentItem, !item.isUnavailable,
-           load(id, autoplay: false, reason: .restoration) {
-            movePlayhead(to: saved.position, adoptingPosition: false)
+           load(id, autoplay: false, reason: .restoration, resumeAt: saved.position) {
+            let opening = ncmLoadTask
+            await opening?.value
         }
+        guard !isShuttingDown else { return }
         // A small checkpoint may contain a newer current point than the archived table.
         // Keep the archive frozen when the user still has an earlier offer to choose.
         archiveCurrentPosition()
@@ -200,6 +212,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
 
     func selectItem(_ id: UUID?) {
         guard selectedID != id else { return }
+        cancelAudioPreparation()
         fileDrop.cancel()
         selectedID = id
     }
@@ -209,6 +222,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
                              canAccept: @escaping () -> Bool = { true },
                              beforePlayback: @escaping () -> Void = {}) -> Bool {
         guard canImportDroppedFiles, canAccept() else { return false }
+        cancelAudioPreparation()
         return fileDrop.start(providers) { [weak self] files, rejected in
             guard let self, self.canImportDroppedFiles, canAccept() else { return }
             _ = self.commitDroppedFiles(files, rejected: rejected, beforePlayback: beforePlayback)
@@ -218,6 +232,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     @discardableResult
     func importDroppedFiles(_ urls: [URL]) -> Bool {
         guard canImportDroppedFiles else { return false }
+        cancelAudioPreparation()
         fileDrop.cancel()
         let files = urls.compactMap { ScopedDropFile(url: $0) }
         return commitDroppedFiles(files, rejected: urls.count - files.count, beforePlayback: {})
@@ -249,7 +264,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         playItem(target.id)
         fileDrop.feedback = skipped > 0 ? "已接收 \(accepted.count) 个音频，跳过 \(skipped) 个不支持或无法读取的项目。" : nil
         logger.info("[drop.import] accepted=\(accepted.count) rejected=\(skipped)")
-        return currentID == target.id && isPlaying
+        return (currentID == target.id && isPlaying) || preparingItemID == target.id
     }
 
     private static func fileOrder(_ left: URL, _ right: URL) -> Bool {
@@ -258,6 +273,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     }
 
     func relocate(_ id: UUID, to url: URL) {
+        cancelAudioPreparation()
         fileDrop.cancel()
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         if items.contains(where: { $0.id != id && $0.url == url.standardizedFileURL }) {
@@ -272,12 +288,23 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         items[index] = PlaylistItem(url: url, id: id)
         if currentID == id {
             let savedPosition = actualPosition
-            guard load(id, autoplay: false, reason: .reloading) else {
-                items[index] = previousItem
-                if accessed { url.stopAccessingSecurityScopedResource(); scopedURLs.remove(url) }
-                return
+            _ = load(id, autoplay: false, reason: .reloading, resumeAt: savedPosition) { [weak self] succeeded in
+                guard let self else { return }
+                if succeeded {
+                    if changedURL, let scoped = self.scopedURLs.first(where: { $0.standardizedFileURL == previousURL.standardizedFileURL }) {
+                        scoped.stopAccessingSecurityScopedResource()
+                        self.scopedURLs.remove(scoped)
+                    }
+                } else {
+                    if let currentIndex = self.items.firstIndex(where: { $0.id == id }),
+                       self.items[currentIndex].url == url.standardizedFileURL {
+                        self.items[currentIndex] = previousItem
+                    }
+                    if accessed { url.stopAccessingSecurityScopedResource(); self.scopedURLs.remove(url) }
+                }
+                self.scheduleSave()
             }
-            movePlayhead(to: savedPosition, adoptingPosition: false)
+            return
         } else if let point = resumePositions[id] {
             // Relocating the same bytes keeps the point; replacing them invalidates it.
             let stamp = fileStamp(for: url)
@@ -291,6 +318,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     }
 
     func chooseRename(for id: UUID, in window: NSWindow?) {
+        cancelAudioPreparation()
         fileDrop.cancel()
         guard !isRestoring, !isChoosingFiles, let window, window.attachedSheet == nil,
               let item = items.first(where: { $0.id == id }) else { return }
@@ -314,6 +342,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
 
     @discardableResult
     func renameFile(_ id: UUID, to proposedName: String) -> Bool {
+        cancelAudioPreparation()
         fileDrop.cancel()
         guard !isRestoring, !isShuttingDown,
               let index = items.firstIndex(where: { $0.id == id }) else { return false }
@@ -355,13 +384,17 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         items[index] = PlaylistItem(url: destination, id: id)
         if destination.startAccessingSecurityScopedResource() { scopedURLs.insert(destination) }
         if wasCurrent {
-            // Release the old path: Ogg seeks create a decoder using the player's URL.
-            (player as? AVAudioPlayer)?.delegate = nil
-            player?.stop()
-            player = nil
-            if load(id, autoplay: false, reason: .reloading) {
-                movePlayhead(to: savedPosition, adoptingPosition: false)
+            if AudioFileTypes.isNcm(destination), preparedAudio != nil, player != nil {
+                // Playback uses the leased restored file; only the original container moved.
+                currentFileStamp = fileStamp(for: destination)
                 if wasPlaying { resume() }
+            } else {
+                // Ogg seeks reopen their source URL, so rebuild after a path change.
+                (player as? AVAudioPlayer)?.delegate = nil
+                player?.stop()
+                player = nil
+                preparedAudio = nil
+                _ = load(id, autoplay: wasPlaying, reason: .reloading, resumeAt: savedPosition)
             }
         }
         if let scoped = scopedURLs.first(where: { $0.standardizedFileURL == original.url }) {
@@ -375,6 +408,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     }
 
     func chooseReplacement(for id: UUID, in window: NSWindow?) {
+        cancelAudioPreparation()
         fileDrop.cancel()
         guard !isChoosingFiles, !isRestoring, let window else { return }
         let panel = NSOpenPanel()
@@ -396,6 +430,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     var canPlay: Bool { currentID != nil || selectedID != nil }
 
     func chooseFiles(in window: NSWindow?) {
+        cancelAudioPreparation()
         fileDrop.cancel()
         guard !isChoosingFiles, !isRestoring, let window else { return }
         let panel = NSOpenPanel()
@@ -415,6 +450,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     }
 
     func addFiles(_ urls: [URL]) {
+        cancelAudioPreparation()
         fileDrop.cancel()
         var known = Set(items.map(\.url))
         var accessible = Set(scopedURLs.map { $0.standardizedFileURL })
@@ -432,6 +468,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     }
 
     func removeSelected() {
+        cancelAudioPreparation()
         fileDrop.cancel()
         guard let id = selectedID, let index = items.firstIndex(where: { $0.id == id }) else { return }
         let item = items[index]
@@ -447,20 +484,81 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     }
 
     @discardableResult
-    func load(_ id: UUID, autoplay: Bool, reason: LoadReason = .switching) -> Bool {
-        guard let item = items.first(where: { $0.id == id }) else { return false }
+    func load(_ id: UUID, autoplay: Bool, reason: LoadReason = .switching,
+              resumeAt: TimeInterval? = nil, onCompletion: ((Bool) -> Void)? = nil) -> Bool {
+        cancelAudioPreparation()
+        guard !isShuttingDown, let item = items.first(where: { $0.id == id }) else {
+            onCompletion?(false)
+            return false
+        }
+        if AudioFileTypes.isNcm(item.url) {
+            let token = UUID()
+            ncmLoadToken = token
+            preparingItemID = id
+            ncmLoadCompletion = onCompletion
+            ncmLoadTask = Task { @MainActor [weak self, preparer = ncmPreparer] in
+                do {
+                    let prepared = try await preparer.prepare(item.url)
+                    guard let self, !Task.isCancelled, !self.isShuttingDown,
+                          self.ncmLoadToken == token,
+                          self.items.contains(where: { $0.id == id && $0.url == item.url }) else { return }
+                    try prepared.validateSource(item.url)
+                    let opened = self.commitLoad(item, playbackURL: prepared.url, prepared: prepared,
+                                                 autoplay: autoplay, reason: reason, resumeAt: resumeAt)
+                    self.finishAudioPreparation(token: token, succeeded: opened)
+                } catch {
+                    guard let self, !Task.isCancelled, !self.isShuttingDown,
+                          self.ncmLoadToken == token else { return }
+                    if let index = self.items.firstIndex(where: { $0.id == id && $0.url == item.url }) {
+                        self.items[index].isUnavailable = !FileManager.default.isReadableFile(atPath: item.url.path)
+                    }
+                    self.finishAudioPreparation(token: token, succeeded: false)
+                    self.report("无法打开“\(item.name)”。\(error.localizedDescription)", error: error)
+                }
+            }
+            return true
+        }
+        let opened = commitLoad(item, playbackURL: item.url, autoplay: autoplay, reason: reason, resumeAt: resumeAt)
+        onCompletion?(opened)
+        return opened
+    }
+
+    func cancelAudioPreparation() {
+        let task = ncmLoadTask
+        let completion = ncmLoadCompletion
+        ncmLoadToken = nil
+        ncmLoadTask = nil
+        ncmLoadCompletion = nil
+        preparingItemID = nil
+        task?.cancel()
+        completion?(false)
+    }
+
+    private func finishAudioPreparation(token: UUID, succeeded: Bool) {
+        guard ncmLoadToken == token else { return }
+        let completion = ncmLoadCompletion
+        ncmLoadToken = nil
+        ncmLoadTask = nil
+        ncmLoadCompletion = nil
+        preparingItemID = nil
+        completion?(succeeded)
+    }
+
+    private func commitLoad(_ item: PlaylistItem, playbackURL: URL, prepared: NcmPreparedAudio? = nil,
+                            autoplay: Bool, reason: LoadReason, resumeAt: TimeInterval?) -> Bool {
+        let id = item.id
         do {
             let candidate: any AudioPlayback
             // Use the portable decoder for Ogg consistently across supported macOS versions.
-            if AudioFileTypes.isOgg(item.url) {
-                let stream = try StreamAudioPlayer(url: item.url)
+            if AudioFileTypes.isOgg(playbackURL) {
+                let stream = try StreamAudioPlayer(url: playbackURL)
                 stream.finished = { [weak self, weak stream] success in
                     guard let stream else { return }
                     self?.handleFinished(stream, successfully: success)
                 }
                 candidate = stream
             } else {
-                let native = try AVAudioPlayer(contentsOf: item.url)
+                let native = try AVAudioPlayer(contentsOf: playbackURL)
                 native.enableRate = true
                 guard native.duration.isFinite, native.duration > 0, native.prepareToPlay() else {
                     throw PlaybackError.unreadable
@@ -468,6 +566,10 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
                 native.delegate = self
                 candidate = native
             }
+            var initialPosition = PlaybackRules.position(resumeAt ?? 0, duration: candidate.duration)
+            if autoplay && initialPosition >= candidate.duration { initialPosition = 0 }
+            if initialPosition > 0 { candidate.currentTime = initialPosition }
+            try prepared?.validateSource(item.url)
             endBoost()
             let previous = player
             previous?.pause()
@@ -478,7 +580,8 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
             }
             let startsVisit = reason == .switching && currentID != id
             if startsVisit { archiveCurrentPosition(at: previousPosition) }
-            let stamp = fileStamp(for: item.url)
+            let stamp = prepared.map { FileStamp(size: $0.sourceSize, modificationTime: $0.sourceModificationTime) }
+                ?? fileStamp(for: item.url)
             let saved = resumePositions[id].flatMap { isValidResume($0, duration: candidate.duration, stamp: stamp) ? $0 : nil }
             if saved == nil { resumePositions[id] = nil }
             if startsVisit {
@@ -492,12 +595,16 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
             previous?.stop()
             stopTicker()
             player = candidate
+            preparedAudio = prepared
             currentFileStamp = stamp
             currentID = id
             selectedID = id
             duration = candidate.duration
-            position = 0
+            position = initialPosition
             isPlaying = autoplay
+            if let prepared, !prepared.warnings.isEmpty {
+                sessionNotice = "此旧版 NCM 的校验信息不一致，已按实际音频格式打开。"
+            }
             if autoplay { startTicker() }
             if let index = items.firstIndex(where: { $0.id == id }) { items[index].isUnavailable = false }
             scheduleSave()
@@ -514,12 +621,14 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     func playItem(_ id: UUID) {
         fileDrop.cancel()
         guard !isRestoring else { return }
+        cancelAudioPreparation()
         if currentID == id { resumeCurrent() } else { load(id, autoplay: true) }
     }
 
     func togglePlayback() {
         fileDrop.cancel()
         guard !isRestoring else { return }
+        cancelAudioPreparation()
         if isPlaying {
             endBoost()
             player?.pause()
@@ -538,8 +647,9 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     private func resumeCurrent() {
         if player == nil, let id = currentID {
             let savedPosition = position
-            guard load(id, autoplay: false, reason: .reloading) else { return }
-            movePlayhead(to: savedPosition >= duration ? 0 : savedPosition, adoptingPosition: false)
+            _ = load(id, autoplay: true, reason: .reloading,
+                     resumeAt: savedPosition >= duration ? 0 : savedPosition)
+            return
         }
         resume()
     }
@@ -561,6 +671,8 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     }
 
     func seek(to value: TimeInterval) {
+        guard !isRestoring else { return }
+        cancelAudioPreparation()
         movePlayhead(to: value, adoptingPosition: true)
     }
 
@@ -569,6 +681,10 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         fileDrop.cancel()
         defer { scheduleSave() }
         if player == nil, let id = currentID {
+            if let item = currentItem, AudioFileTypes.isNcm(item.url) {
+                if adoptingPosition { pendingResume = nil }
+                return load(id, autoplay: false, reason: .reloading, resumeAt: value)
+            }
             guard load(id, autoplay: false, reason: .reloading) else { return false }
         }
         guard let player else { return false }
@@ -579,6 +695,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
             player.stop()
             (player as? AVAudioPlayer)?.delegate = nil
             self.player = nil
+            preparedAudio = nil
             isPlaying = false
             position = duration
             pendingResume = nil
@@ -613,6 +730,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
             (finishedPlayer as? AVAudioPlayer)?.delegate = nil
             finishedPlayer.stop()
             player = nil
+            preparedAudio = nil
             scheduleSave()
             report("音频播放中断，请重新打开文件。", error: PlaybackError.unreadable)
             return
@@ -621,6 +739,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         pendingResume = nil
         if let id = currentID { resumePositions[id] = nil }
         scheduleSave()
+        guard !isPreparingAudio else { return }
         guard let id = currentID,
               let next = PlaybackRules.nextID(after: id, in: items, autoAdvance: autoAdvance) else { return }
         load(next, autoplay: true)
@@ -639,6 +758,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         failedPlayer.delegate = nil
         failedPlayer.stop()
         player = nil
+        preparedAudio = nil
         isPlaying = false
         stopTicker()
         scheduleSave()
@@ -648,11 +768,13 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     func shutdown() {
         fileDrop.cancel()
         guard !isShuttingDown else { return }
+        cancelAudioPreparation()
         pendingSave?.cancel()
         if !isRestoring { archiveCurrentPosition() }
         if !isRestoring, let sessionStore { showSaveError(sessionStore.flush(snapshot())) }
         isShuttingDown = true
         clearPlayback()
+        ncmPreparer.cancelAllAndWait()
         scopedURLs.forEach { $0.stopAccessingSecurityScopedResource() }
         scopedURLs.removeAll()
     }
@@ -663,6 +785,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         (player as? AVAudioPlayer)?.delegate = nil
         player?.stop()
         player = nil
+        preparedAudio = nil
         currentFileStamp = nil
         pendingResume = nil
         currentID = nil
