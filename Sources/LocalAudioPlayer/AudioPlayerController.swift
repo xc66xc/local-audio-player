@@ -317,6 +317,16 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         scheduleSave()
     }
 
+    func showInFinder(_ id: UUID) {
+        guard !isRestoring, !isShuttingDown,
+              let item = items.first(where: { $0.id == id }) else { return }
+        guard FileManager.default.fileExists(atPath: item.url.path) else {
+            errorMessage = "无法在 Finder 中显示“\(item.name)”。原文件不存在或无法访问，请使用“重新定位文件…”。"
+            return
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([item.url])
+    }
+
     func chooseRename(for id: UUID, in window: NSWindow?) {
         cancelAudioPreparation()
         fileDrop.cancel()
