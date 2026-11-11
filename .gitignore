@@ -33,6 +33,7 @@ agent.md
 *.adts
 *.aifc
 *.caf
+*.ncm
 /recordings/
 /local/
 
