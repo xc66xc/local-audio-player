@@ -340,6 +340,7 @@ struct PlayerView: View {
                                  play: { controller.playItem(item.id) },
                                  relocate: { controller.chooseReplacement(for: item.id, in: keyboard.window) })
                             .contextMenu {
+                                Button("在 Finder 中显示") { controller.showInFinder(item.id) }
                                 Button("重命名…") { controller.chooseRename(for: item.id, in: keyboard.window) }
                                 Button("重新定位文件…") { controller.chooseReplacement(for: item.id, in: keyboard.window) }
                                 Button("从列表移除") { controller.selectedID = item.id; controller.removeSelected() }
