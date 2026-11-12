@@ -431,6 +431,214 @@ final class PlayerTests: CheckSuite {
         expectEqual(try Data(contentsOf: fixture.source), fixture.bytes)
     }
 
+    @MainActor func testRestartNativeStateAndSavedResume() async throws {
+        let store = try sessionStore()
+        let controller = AudioPlayerController(sessionStore: store)
+        defer { controller.shutdown() }
+        await controller.restoreSession()
+        controller.restartPlayback()
+        expectNil(controller.currentID)
+        expectFalse(controller.isPlaying)
+        controller.addFiles([try fixture("01-restart.m4a", seconds: 20), try fixture("02-selected.m4a")])
+        controller.restartPlayback()
+        expectNil(controller.currentID)
+
+        let current = controller.items[0].id
+        let selected = controller.items[1].id
+        expectTrue(controller.load(current, autoplay: false))
+        controller.seek(to: 7)
+        expectTrue(controller.load(selected, autoplay: false))
+        expectTrue(controller.load(current, autoplay: true))
+        expectEqual(controller.pendingResume?.position, 7)
+        controller.holdRate = 1.75
+        controller.beginBoost()
+        expectTrue(controller.isBoosting)
+        controller.selectedID = selected
+        controller.restartPlayback()
+        expectEqual(controller.currentID, current)
+        expectTrue(controller.isPlaying)
+        expectEqual(controller.position, 0, accuracy: 0.1)
+        expectFalse(controller.isBoosting)
+        expectEqual(controller.playbackRate, Float(1))
+        expectNil(controller.pendingResume)
+        expectTrue(try await waitForSession { controller.position > 0.15 })
+
+        controller.togglePlayback()
+        controller.seek(to: 4)
+        controller.restartPlayback()
+        expectTrue(controller.isPlaying)
+        expectEqual(controller.currentID, current)
+        expectEqual(controller.position, 0, accuracy: 0.1)
+        controller.seek(to: controller.duration)
+        expectFalse(controller.isPlaying)
+        controller.autoAdvance = true
+        controller.restartPlayback()
+        expectTrue(controller.isPlaying)
+        expectEqual(controller.currentID, current)
+        expectTrue(try await waitForSession { controller.position > 0.15 })
+        expectLessThan(controller.position, 2)
+        controller.togglePlayback()
+        let restartedPosition = controller.position
+        controller.shutdown()
+
+        let saved = await SessionStore(fileURL: store.fileURL).load()
+        expectNil(saved.session?.pendingResume)
+        expectNil(saved.session?.resumePositions[current])
+        let restored = AudioPlayerController(sessionStore: SessionStore(fileURL: store.fileURL))
+        defer { restored.shutdown() }
+        await restored.restoreSession()
+        expectEqual(restored.currentID, current)
+        expectEqual(restored.position, restartedPosition, accuracy: 0.1)
+        expectFalse(restored.isPlaying)
+        expectNil(restored.pendingResume)
+    }
+
+    @MainActor func testRestartOpusAndNcmPreparedPlayback() async throws {
+        let opus = AudioPlayerController()
+        defer { opus.shutdown() }
+        opus.addFiles([try encodedFixture("01.opus", codec: "libopus"), try fixture("02.m4a")])
+        let first = opus.items[0].id
+        expectTrue(opus.load(first, autoplay: true))
+        opus.autoAdvance = true
+        opus.seek(to: opus.duration - 0.15)
+        opus.restartPlayback()
+        expectEqual(opus.currentID, first)
+        expectTrue(opus.isPlaying)
+        expectEqual(opus.position, 0, accuracy: 0.15)
+        // Wait beyond the previous session's end; it must not advance this restart.
+        expectTrue(try await waitForSession { opus.position > 0.3 })
+        expectEqual(opus.currentID, first)
+        expectLessThan(opus.position, 2)
+        opus.seek(to: opus.duration)
+        opus.restartPlayback()
+        expectTrue(opus.isPlaying)
+        expectEqual(opus.currentID, first)
+        expectEqual(opus.position, 0, accuracy: 0.15)
+
+        let fixture = try ncmFixture("当前.ncm", codec: "flac")
+        let helperDirectory = try ncmDirectory("restart-helper")
+        let release = helperDirectory.appendingPathComponent("release")
+        try Data().write(to: release)
+        let helper = try ncmSlowHelper(in: helperDirectory, release: release)
+        let temporary = try ncmDirectory("restart-prepared")
+        let controller = AudioPlayerController(ncmPreparer: NcmPreparer(toolURL: helper.tool, temporaryRoot: temporary))
+        defer { controller.shutdown() }
+        controller.addFiles([fixture.source])
+        let id = controller.items[0].id
+        expectTrue(controller.load(id, autoplay: false))
+        expectTrue(try await waitForSession { !controller.isPreparingAudio })
+        expectEqual(controller.currentID, id)
+        controller.seek(to: controller.duration)
+        controller.restartPlayback()
+        expectTrue(controller.isPreparingAudio)
+        expectTrue(try await waitForSession { !controller.isPreparingAudio })
+        expectTrue(controller.isPlaying)
+        expectEqual(controller.currentID, id)
+        expectLessThan(controller.position, 1)
+        controller.togglePlayback()
+        controller.seek(to: 5)
+        expectTrue(controller.renameFile(id, to: "改名后的当前音频"))
+        let preparedDirectories = try FileManager.default.contentsOfDirectory(atPath: temporary.path).sorted()
+        expectFalse(preparedDirectories.isEmpty)
+        // A loaded NCM must keep its restored lease: a second helper is unavailable.
+        try FileManager.default.removeItem(at: helper.tool)
+        controller.restartPlayback()
+        expectFalse(controller.isPreparingAudio)
+        expectTrue(controller.isPlaying)
+        expectEqual(controller.currentID, id)
+        expectEqual(controller.position, 0, accuracy: 0.15)
+        expectEqual(controller.currentItem?.name, "改名后的当前音频.ncm")
+        expectEqual(try FileManager.default.contentsOfDirectory(atPath: temporary.path).sorted(), preparedDirectories)
+        expectTrue(try await waitForSession { controller.position > 0.15 })
+        expectNil(controller.errorMessage)
+        expectEqual(try Data(contentsOf: controller.currentItem!.url), fixture.bytes)
+        controller.shutdown()
+        expectTrue(directoryIsEmpty(temporary))
+    }
+
+    @MainActor func testRestartSupersedesPendingImports() async throws {
+        let fixture = try ncmFixture("02-late.ncm", codec: "libmp3lame")
+        let helper = try ncmSlowHelper(in: ncmDirectory("restart-cancel-helper"))
+        let temporary = try ncmDirectory("restart-cancel-output")
+        let controller = AudioPlayerController(ncmPreparer: NcmPreparer(toolURL: helper.tool, temporaryRoot: temporary))
+        defer { controller.shutdown() }
+        controller.addFiles([try self.fixture("01-current.m4a"), fixture.source])
+        let current = controller.items[0].id
+        expectTrue(controller.load(current, autoplay: true))
+        controller.seek(to: 3)
+        let gate = DropProviderGate(url: try self.fixture("03-late-drop.m4a"))
+        expectTrue(controller.receiveDroppedFiles([gate.provider]))
+        expectTrue(try await waitForSession { gate.wasRequested })
+        controller.restartPlayback()
+        expectFalse(controller.fileDrop.isLoading)
+        expectEqual(controller.position, 0, accuracy: 0.1)
+        gate.deliver()
+        expectTrue(try await waitForSession { controller.position > 0.15 })
+        expectEqual(controller.items.count, 2)
+        expectEqual(controller.currentID, current)
+
+        controller.seek(to: 4)
+        expectTrue(controller.load(controller.items[1].id, autoplay: true))
+        expectTrue(try await waitForSession { helperIsRunning(helper.pid) })
+        controller.restartPlayback()
+        expectTrue(try await waitForSession { !controller.isPreparingAudio && !helperIsRunning(helper.pid) })
+        expectEqual(controller.currentID, current)
+        expectTrue(controller.isPlaying)
+        expectLessThan(controller.position, 2)
+        expectTrue(try await waitForSession { directoryIsEmpty(temporary) })
+    }
+
+    @MainActor func testRestartFailureAndStartupGuards() async throws {
+        let source = try fixture("01-restart-missing.m4a")
+        let controller = AudioPlayerController()
+        defer { controller.shutdown() }
+        controller.addFiles([source, try fixture("02.m4a")])
+        let id = controller.items[0].id
+        expectTrue(controller.load(id, autoplay: false))
+        controller.seek(to: 7)
+        expectTrue(controller.load(controller.items[1].id, autoplay: false))
+        expectTrue(controller.load(id, autoplay: true))
+        expectTrue(try await waitForSession { controller.position > 0.15 })
+        controller.togglePlayback()
+        let position = controller.position
+        expectEqual(controller.pendingResume?.position, 7)
+        try FileManager.default.removeItem(at: source)
+        controller.restartPlayback()
+        expectNotNil(controller.errorMessage)
+        expectEqual(controller.currentID, id)
+        expectEqual(controller.position, position, accuracy: 0.05)
+        expectEqual(controller.pendingResume?.position, 7)
+        expectFalse(controller.isPlaying)
+        controller.shutdown()
+        controller.restartPlayback()
+        expectNil(controller.currentID)
+        expectFalse(controller.isPlaying)
+
+        let fixture = try ncmFixture("恢复中的音频.ncm", codec: "flac")
+        let helperDirectory = try ncmDirectory("restart-restore-helper")
+        let release = helperDirectory.appendingPathComponent("release")
+        let helper = try ncmSlowHelper(in: helperDirectory, release: release)
+        let store = try sessionStore()
+        let item = PlaylistItem(url: fixture.source)
+        let saved = SavedSession(items: [item], selectedID: item.id, currentID: item.id,
+            position: 6, duration: 12, autoAdvance: false, forwardSeconds: 5, backwardSeconds: 5, holdRate: 2)
+        expectNil(store.flush(saved))
+        let restoring = AudioPlayerController(sessionStore: store,
+            ncmPreparer: NcmPreparer(toolURL: helper.tool, temporaryRoot: try ncmDirectory("restart-restore-output")))
+        defer { restoring.shutdown() }
+        let restoration = Task { await restoring.restoreSession() }
+        expectTrue(try await waitForSession { restoring.isRestoring && helperIsRunning(helper.pid) })
+        restoring.restartPlayback()
+        expectTrue(restoring.isPreparingAudio)
+        expectTrue(helperIsRunning(helper.pid))
+        try Data().write(to: release)
+        await restoration.value
+        expectFalse(restoring.isRestoring)
+        expectFalse(restoring.isPlaying)
+        expectEqual(restoring.position, 6, accuracy: 0.05)
+        expectEqual(restoring.currentID, item.id)
+    }
+
     private func encodedFixture(_ name: String, codec: String, seconds: Double = 8,
                                 options: [String] = []) throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MiniAudioFormats-\(UUID())")

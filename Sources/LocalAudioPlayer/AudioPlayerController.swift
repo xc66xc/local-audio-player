@@ -555,6 +555,7 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
     }
 
     private func commitLoad(_ item: PlaylistItem, playbackURL: URL, prepared: NcmPreparedAudio? = nil,
+                            reusingPreparedAudio: Bool = false,
                             autoplay: Bool, reason: LoadReason, resumeAt: TimeInterval?) -> Bool {
         let id = item.id
         do {
@@ -579,7 +580,8 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
             var initialPosition = PlaybackRules.position(resumeAt ?? 0, duration: candidate.duration)
             if autoplay && initialPosition >= candidate.duration { initialPosition = 0 }
             if initialPosition > 0 { candidate.currentTime = initialPosition }
-            try prepared?.validateSource(item.url)
+            // An already-open NCM keeps playing its leased bytes after a source rename.
+            if !reusingPreparedAudio { try prepared?.validateSource(item.url) }
             endBoost()
             let previous = player
             previous?.pause()
@@ -590,8 +592,9 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
             }
             let startsVisit = reason == .switching && currentID != id
             if startsVisit { archiveCurrentPosition(at: previousPosition) }
-            let stamp = prepared.map { FileStamp(size: $0.sourceSize, modificationTime: $0.sourceModificationTime) }
-                ?? fileStamp(for: item.url)
+            let stamp = reusingPreparedAudio ? currentFileStamp :
+                (prepared.map { FileStamp(size: $0.sourceSize, modificationTime: $0.sourceModificationTime) }
+                 ?? fileStamp(for: item.url))
             let saved = resumePositions[id].flatMap { isValidResume($0, duration: candidate.duration, stamp: stamp) ? $0 : nil }
             if saved == nil { resumePositions[id] = nil }
             if startsVisit {
@@ -633,6 +636,30 @@ final class AudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDele
         guard !isRestoring else { return }
         cancelAudioPreparation()
         if currentID == id { resumeCurrent() } else { load(id, autoplay: true) }
+    }
+
+    func restartPlayback() {
+        guard !isRestoring, !isShuttingDown, currentID != nil else { return }
+        fileDrop.cancel()
+        cancelAudioPreparation()
+        // Cancelling a pending relocation may restore the previous source URL.
+        guard let item = currentItem else { return }
+        endBoost()
+        let completed: (Bool) -> Void = { [weak self] succeeded in
+            guard succeeded, let self, self.currentID == item.id else { return }
+            self.pendingResume = nil
+            self.resumePositions[item.id] = nil
+            self.scheduleSave()
+            self.logger.info("[playback.restart] item=\(item.id.uuidString, privacy: .public)")
+        }
+        if let preparedAudio, player != nil {
+            // A new player identity rejects delayed finish events without unpacking NCM again.
+            completed(commitLoad(item, playbackURL: preparedAudio.url, prepared: preparedAudio,
+                                 reusingPreparedAudio: true, autoplay: true,
+                                 reason: .reloading, resumeAt: 0))
+        } else {
+            _ = load(item.id, autoplay: true, reason: .reloading, resumeAt: 0, onCompletion: completed)
+        }
     }
 
     func togglePlayback() {
