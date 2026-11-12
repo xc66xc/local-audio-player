@@ -141,6 +141,21 @@ struct MiniPlayerView: View {
 
     private var transport: some View {
         HStack(spacing: 10) {
+            Button {
+                keyboard.cancelPress()
+                controller.restartPlayback()
+            } label: {
+                Image(systemName: "arrow.backward.to.line")
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: 28, height: 28)
+                    .background(Color(nsColor: .quaternaryLabelColor).opacity(0.35), in: Circle())
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(controller.currentID == nil)
+            .opacity(controller.currentID == nil ? 0.45 : 1)
+            .accessibilityLabel("重新播放")
+            .help("重新播放：从头播放当前音频")
             seekButton(backward: true)
             Button {
                 keyboard.cancelPress()

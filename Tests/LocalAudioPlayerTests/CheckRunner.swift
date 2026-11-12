@@ -46,6 +46,10 @@ struct CheckRunner {
     @MainActor static func main() async {
         let suite = PlayerTests()
         let tests: [(String, @MainActor () async throws -> Void)] = [
+            ("重播当前音频、暂停/结尾恢复、清除续听及保存新位置", suite.testRestartNativeStateAndSavedResume),
+            ("Opus 重播不误连播、已改名 NCM 复用还原文件", suite.testRestartOpusAndNcmPreparedPlayback),
+            ("重播取消迟到拖入与 NCM 准备，保持当前曲目", suite.testRestartSupersedesPendingImports),
+            ("重播失败保留旧位置和提示，启动恢复期间不抢播", suite.testRestartFailureAndStartupGuards),
             ("NCM 0/1 标记的 MP3/FLAC 按字节还原、警告及临时租约清理", suite.testNcmPreparationBytesWarningsAndLeaseCleanup),
             ("NCM CRC 损坏、截断及无效音频拒绝且保留原文件", suite.testNcmRejectsCorruptTruncatedAndInvalidAudio),
             ("NCM 实际播放、跳转、长按倍速与自然结束连播", suite.testNcmPlaybackSeekHoldAndNaturalCompletion),

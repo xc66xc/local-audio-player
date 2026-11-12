@@ -240,7 +240,7 @@ struct PlayerView: View {
             .foregroundStyle(PlayerStyle.muted)
             .padding(.top, 4)
 
-            HStack(spacing: 28) {
+            HStack(spacing: 20) {
                 seekButton(backward: true)
                 Button { controller.togglePlayback() } label: {
                     Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
@@ -255,6 +255,31 @@ struct PlayerView: View {
                 .disabled(!controller.canPlay)
                 .opacity(controller.canPlay ? 1 : 0.45)
                 seekButton(backward: false)
+            }
+            .frame(maxWidth: .infinity)
+            .overlay(alignment: .leading) {
+                Button {
+                    keyboard.cancelPress()
+                    controller.restartPlayback()
+                } label: {
+                    VStack(spacing: 4) {
+                        Image(systemName: "arrow.backward.to.line")
+                            .font(.system(size: 18, weight: .medium))
+                            .frame(width: 40, height: 40)
+                            .background(Color(nsColor: .quaternaryLabelColor).opacity(0.35), in: Circle())
+                        Text("重新播放")
+                            .font(.system(size: 10))
+                            .foregroundStyle(PlayerStyle.muted)
+                    }
+                    .padding(.top, 16)
+                    .frame(width: 52, height: 76)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(controller.currentID == nil)
+                .opacity(controller.currentID == nil ? 0.45 : 1)
+                .accessibilityLabel("重新播放")
+                .help("从头播放当前音频")
             }
             .padding(.top, 20)
             Text("空格 播放/暂停 · → 长按倍速")
